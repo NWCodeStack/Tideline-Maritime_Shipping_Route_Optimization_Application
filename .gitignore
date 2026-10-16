@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Trained model is rebuilt automatically on first launch (~2 s); 29 MB pickle stays out of git
+models/
+
+# Secrets and local config
+.streamlit/secrets.toml
+.env
+.env.*
+!.env.example
+
+# Editor / OS / local tooling
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.claude/
