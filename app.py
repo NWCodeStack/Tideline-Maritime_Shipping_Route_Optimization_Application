@@ -34,6 +34,7 @@ SCENARIOS = {
         "atlantic_hurricane": 0.9, "taiwan_tension": 0.4},
 }
 TICK_S = 1.0                     # playback refresh interval (real seconds)
+RIGHT_TABS = ["Operate", "Optimize", "Route comparison", "Alerts & intelligence", "Data sources"]
 
 
 def console_demo() -> None:
@@ -92,12 +93,14 @@ def render_ui() -> None:
     import copilot
     import intel
     import economics as ECO
+    import panels as P
     import risk as RISK
+    import sources as SRC
     import ui
     import voyage as V
     from agents import CARGO_OWNERS, VESSELS, make_agent, profile_matrix
     from data_engine import CHOKEPOINTS, edges_dataframe, hub_ports
-    from events import EVENT_BY_KEY, EVENT_CATALOG, HURRICANE_TRACKS, PRESETS
+    from events import EVENT_CATALOG, HURRICANE_TRACKS, PRESETS
     from llm import get_provider
     from map_view import build_map_html, build_ops_map_html
     from ml_models import HULL
@@ -176,6 +179,7 @@ def render_ui() -> None:
         for spec in EVENT_CATALOG:
             ss[f"inc_{spec.key}"] = ops.settings[spec.key]
         ss["inc_hurricane_track"] = ops.settings["hurricane_track"]
+        ss["inc_picker"] = P.selected_incidents(ops.settings)
         ss["play_speed"] = next((k for k, v in SPEEDS.items() if v == ops.speed), "10 h/s")
 
     def flash(msg: str) -> None:
@@ -226,6 +230,10 @@ def render_ui() -> None:
     def on_incident(key: str) -> None:
         flash(ops.set_event(key, ss[f"inc_{key}"]))
 
+    def on_incident_picker() -> None:
+        for key, on in P.incident_changes(ss["inc_picker"], ops.settings):
+            flash(ops.set_event(key, on))
+
     def on_speed() -> None:
         ops.set_speed(SPEEDS[ss["play_speed"]])
 
@@ -269,115 +277,6 @@ def render_ui() -> None:
     v = ops.voyage
 
     # ----------------------------------------------------------------------------------------------
-    # Sidebar: ADVANCED configuration only (collapsed by default). Everything needed for a demo is on the page.
-    # ----------------------------------------------------------------------------------------------
-    with st.sidebar:
-        st.markdown('<div class="panel-title">Advanced settings</div><div class="panel-sub">Vessel economics, '
-                    'optimisation, delays and extra scenarios. Changes re-plan from the ship\'s position.</div>',
-                    unsafe_allow_html=True)
-        with st.expander("Voyage details", expanded=False):
-            st.selectbox("Cargo owner", list(V.VESSEL_OWNERS[ops.cfg.vessel_key]), key="cfg_owner",
-                         format_func=lambda k: f"{CARGO_OWNERS[k].label} · {CARGO_OWNERS[k].cargo}",
-                         on_change=on_voyage, disabled=started)
-            d1, d2 = st.columns(2)
-            d1.date_input("Departure (UTC)", key="cfg_dep_date", on_change=on_cfg, args=("departure",),
-                          disabled=started)
-            d2.time_input("Time", key="cfg_dep_time", on_change=on_cfg, args=("departure",), disabled=started,
-                          step=3600)
-        with st.expander("Vessel & fuel economics", expanded=False):
-            lo, hi = HULL[VESSELS[ops.cfg.vessel_key].vessel_type]["speed"]
-            st.toggle("Fixed cruising speed", key="cfg_fixed_speed", on_change=on_cfg, args=("cruise_speed_kn",),
-                      help="Off: the optimiser picks the cheapest of the vessel's speed options on every lane.")
-            st.slider("Cruising speed (kn)", float(lo), float(hi), step=0.5, key="cfg_speed", on_change=on_cfg,
-                      args=("cruise_speed_kn",), disabled=not ops.cfg.cruise_speed_kn)
-            st.slider("Fuel price ($/t VLSFO)", 300.0, 1600.0, step=10.0, key="cfg_fuel", on_change=on_cfg,
-                      args=("fuel_price",))
-            agent = ops.cfg.agent()
-            spd = agent.speed_options_kn[len(agent.speed_options_kn) // 2]
-            from routing_engine import predict_tonnes_per_day
-            tpd = float(predict_tonnes_per_day(model, agent.vessel_type, spd, agent.draft_m, agent.cargo_weight_t,
-                                               15.0, 1.5)[0])
-            st.caption(md(f"Model estimate at {spd:g} kn, calm sea: **{tpd:,.0f} t/day** "
-                          f"(≈ ${tpd * ops.cfg.fuel_price / 1e3:,.0f}k/day)."))
-        with st.expander("Presets & economics", expanded=False):
-            st.radio("Preset", [*ECO.PRESETS, "custom"], key="cfg_preset", horizontal=True, on_change=on_preset,
-                     format_func=lambda k: ECO.PRESETS[k].label if k in ECO.PRESETS else "Custom",
-                     help=" · ".join(f"{p.label}: {p.blurb}" for p in ECO.PRESETS.values())
-                     + " Moving a slider below switches to Custom.")
-            st.slider("Value of time (x)", 1.0, 10.0, step=0.5, key="cfg_tvm", on_change=on_econ,
-                      args=("time_value_mult",),
-                      help="A delayed hour counts this many times its cash cost in the speed and route decision.")
-            st.slider("Carbon price ($/t CO2)", 0.0, 1000.0, step=10.0, key="cfg_carbon", on_change=on_econ,
-                      args=("carbon_usd_per_t",),
-                      help="Decision weight only: it slows the ship and favours cleaner routes but is never added to cash cost.")
-            st.toggle("EU ETS (voyages calling at an EU port)", key="cfg_ets_on", on_change=on_econ, args=("ets_enabled",))
-            e1, e2 = st.columns(2)
-            e1.number_input("Allowance ($/t)", 0.0, 400.0, step=5.0, key="cfg_eua", on_change=on_econ,
-                            args=("eua_usd_per_t",), disabled=not ops.cfg.econ.ets_enabled)
-            e2.number_input("Coverage (%)", 0.0, 100.0, step=10.0, key="cfg_etsc", on_change=on_econ,
-                            args=("ets_coverage_pct",), disabled=not ops.cfg.econ.ets_enabled)
-            st.radio("Fuel price source", ["global", "origin_port"], key="cfg_fuelmode", horizontal=True,
-                     on_change=on_econ, args=("fuel_price_mode",),
-                     format_func=lambda k: "Fuel-price setting" if k == "global" else "Departure port (sample)")
-            st.number_input(f"Bunker price at {ports[ops.cfg.origin]} ($/t, override)", 100.0, 3000.0, step=10.0,
-                            key="cfg_fuel_ovr", on_change=on_econ, args=("fuel_overrides",),
-                            disabled=ops.cfg.econ.fuel_price_mode != "origin_port",
-                            help="SAMPLE price table unless you override it here.")
-        with st.expander("Route optimisation", expanded=False):
-            st.radio("Objective", list(V.PREFERENCES), key="cfg_pref", horizontal=True,
-                     format_func=V.PREFERENCES.get, on_change=on_cfg, args=("preference",),
-                     help=" · ".join(f"{V.PREFERENCES[k]}: {t}" for k, t in V.PREFERENCE_HELP.items()))
-            if ops.cfg.preference == "balanced":
-                st.caption("Balanced weights")
-                st.slider("Time", 0.0, 3.0, step=0.25, key="cfg_w_time", on_change=on_cfg, args=("weights",))
-                st.slider("Cost", 0.0, 3.0, step=0.25, key="cfg_w_cost", on_change=on_cfg, args=("weights",))
-                st.slider("Risk", 0.0, 3.0, step=0.25, key="cfg_w_risk", on_change=on_cfg, args=("weights",))
-            st.multiselect("Avoid chokepoints", list(CHOKEPOINTS), key="cfg_avoid", format_func=CHOKEPOINTS.get,
-                           on_change=on_cfg, args=("avoid",), help="Treated as closed for this voyage.")
-        with st.expander("Canal & berth delays", expanded=False):
-            st.number_input("Berth wait at destination (h)", 0.0, 240.0, step=6.0, key="cfg_port_delay",
-                            on_change=on_cfg, args=("port_delay_hours",))
-            st.number_input("Extra delay per canal transit (h)", 0.0, 240.0, step=6.0, key="cfg_canal_delay",
-                            on_change=on_cfg, args=("canal_delay_hours",))
-            p1, p2 = st.columns(2)
-            cport = p1.selectbox("Congested port", port_ids, index=port_ids.index(ops.cfg.destination),
-                                 key="cong_port", format_func=lambda p: ports[p])
-            chrs = p2.number_input("Extra wait (h)", 0.0, 480.0, 48.0, 12.0, key="cong_hours")
-            st.button("Apply port congestion (scenario)", on_click=cb(ops.set_congestion, cport, chrs),
-                      width="stretch")
-        with st.expander("Storm scenario", expanded=False):
-            w1, w2 = st.columns(2)
-            wave = w1.number_input("Wave height (m)", 2.0, 15.0, 6.0, 0.5, key="storm_wave")
-            rad = w2.number_input("Radius (nm)", 100.0, 1000.0, 300.0, 50.0, key="storm_radius")
-            s1, s2 = st.columns(2)
-            s1.button("Storm ahead", on_click=cb(ops.add_storm, wave, None, None, rad), width="stretch")
-            s2.button("Clear storms", on_click=cb(ops.clear_storms), width="stretch",
-                      disabled=not ops.settings["storm_cells"])
-            st.caption(f"Cores ≥ 5 m waves are avoided when an alternative exists. "
-                       f"Active storm cells: {len(ops.settings['storm_cells'])}.")
-        with st.expander("More scenarios & fees", expanded=False):
-            st.slider("Red Sea security escalation", 0.0, 1.0, step=0.05, key="inc_red_sea_escalation",
-                      on_change=on_incident, args=("red_sea_escalation",))
-            st.slider("Suez fee ×", 1.0, 10.0, step=0.5, key="inc_suez_toll_multiplier", on_change=on_incident,
-                      args=("suez_toll_multiplier",))
-            st.slider("Panama fee ×", 1.0, 5.0, step=0.5, key="inc_panama_toll_multiplier", on_change=on_incident,
-                      args=("panama_toll_multiplier",))
-            st.slider("Taiwan Strait tension", 0.0, 1.0, step=0.05, key="inc_taiwan_tension",
-                      on_change=on_incident, args=("taiwan_tension",))
-            st.slider("Atlantic hurricane (severity)", 0.0, 1.0, step=0.05, key="inc_atlantic_hurricane",
-                      on_change=on_incident, args=("atlantic_hurricane",))
-            st.selectbox("Hurricane track", list(HURRICANE_TRACKS), key="inc_hurricane_track",
-                         format_func=lambda k: HURRICANE_TRACKS[k][0], on_change=on_incident,
-                         args=("hurricane_track",))
-            st.toggle("Panama Canal drought", key="inc_panama_drought", on_change=on_incident,
-                      args=("panama_drought",))
-            preset = st.selectbox("Preset", list(PRESETS), key="preset_pick")
-            st.button("Apply preset", on_click=cb(ops.apply_settings, PRESETS[preset], f"preset '{preset}'"),
-                      width="stretch")
-        with st.expander("Data sources & methodology", expanded=False):
-            st.markdown(ui.METHODOLOGY, unsafe_allow_html=True)
-
-    # ----------------------------------------------------------------------------------------------
     # Header
     # ----------------------------------------------------------------------------------------------
     state = ("blocked" if v.status == "blocked" else "arrived" if v.status == "arrived" else
@@ -386,7 +285,7 @@ def render_ui() -> None:
     active = describe(ops.settings)
     st.markdown(f'<div class="subline">Live operations: plan, sail, disrupt and reroute a <b>simulated</b> vessel. '
                 f'{"Active scenarios (simulated): <b>" + html.escape(" · ".join(active)) + "</b>" if active else "No scenarios active."}'
-                f' <span class="intel-meta">Advanced settings: sidebar »</span></div>', unsafe_allow_html=True)
+                f'</div>', unsafe_allow_html=True)
     tab_live, tab_stress = st.tabs(["Live operations", "Multi-agent stress test"])
 
     with tab_live:
@@ -395,13 +294,52 @@ def render_ui() -> None:
             st.markdown(ui.change_banner({"before": change["before"], "after": change["after"]},
                                          demo=bool(ops.demo)), unsafe_allow_html=True)
 
-        # ---------------- Row 1: Voyage & Simulation | Alerts & Intelligence
-        top_l, top_r = st.columns([1.05, 1], gap="medium")
-        with top_l:
-            with st.container(border=True):
-                st.markdown('<div class="panel-title">Voyage & Simulation</div><div class="panel-sub">Ports, playback '
-                            'and scenario controls. Scenarios are SIMULATED, never real closures.</div>',
-                            unsafe_allow_html=True)
+        # ---------------- Route KPIs and telemetry (full width, tick during playback)
+        kpi_fragment(st, ops, ui, V)()
+
+        # ---------------- Left: the live map (never inside a tab, so switching tabs cannot reset it) + copilot.
+        # ---------------- Right: the tabs. Only this side changes when you switch.
+        map_col, side_col = st.columns([1.25, 1], gap="medium")
+        with map_col:
+            map_fragment(st, ss, ops, model, ui, V, HAS_FOLIUM, st_folium, build_ops_base_map, build_ops_layer,
+                         build_ops_map_html, components, on_seek, current_weather)()
+            chip = "mode-chip" if llm else "mode-chip cmd"
+            st.markdown(f'<div class="copilot-head"><div class="panel-title">Operations Copilot</div>'
+                        f'<span class="{chip}">{html.escape(llm_label)}</span></div>', unsafe_allow_html=True)
+            with st.container(height=300, border=True):
+                if not ops.chat:
+                    st.markdown(md("Give me instructions (\"Close Suez and reroute my ship\") or ask questions "
+                                   "(\"What if Suez closes?\"). Questions and what-ifs never change the voyage; "
+                                   "what-ifs run on a copy and are labelled PREVIEW."))
+                for m in ops.chat[-40:]:
+                    with st.chat_message(m["role"], avatar="🧭" if m["role"] == "assistant" else "👤"):
+                        if m["role"] == "assistant":
+                            tag = "LLM" if m.get("mode") == "llm" else "rules"
+                            chips = "".join(f'<span class="op-chip">{html.escape(n)}'
+                                            f'{html.escape(json.dumps(a)) if a else ""}</span>' for n, a in m.get("ops", []))
+                            st.markdown(f'<span class="op-chip">{tag}</span>{chips}', unsafe_allow_html=True)
+                        st.markdown(md(m["content"]))
+                        if m.get("rejected"):
+                            st.caption("Rejected (failed validation): " + "; ".join(m["rejected"]))
+            examples = [("Close Suez + reroute", "Close Suez and reroute my ship"),
+                        ("What if Suez closes?", "What if the Suez Canal closes?"),
+                        ("Advance 5 days", "Advance the voyage by 5 days"),
+                        ("6 m storm ahead", "A storm with 6 m waves is affecting our route. Reroute to avoid it."),
+                        ("Safest route?", "What is the safest available route?"),
+                        ("Pause + risk", "Pause the vessel and explain our current operational risk")]
+            ex_cols = st.columns(3)
+            for i, (lab, ex) in enumerate(examples):
+                ex_cols[i % 3].button(lab, key=f"ex_{i}", on_click=on_chat, args=(ex,), width="stretch", help=ex)
+            st.chat_input("Instruction or question…", key="chat_in", on_submit=on_chat)
+
+        with side_col:
+            t_op, t_opt, t_cmp, t_alert, t_src = st.tabs(RIGHT_TABS, key="right_tabs")
+
+            # ============ Operate: voyage, playback, demo, incidents
+            with t_op:
+                p_now = V.projected(v, G0)
+                risk_now = p_now["risk_index"] if v.status == "arrived" else p_now["remaining_risk_index"]
+                st.markdown(P.status_line(v.recommendation, ops.route_corridor(), risk_now), unsafe_allow_html=True)
                 c1, c2, c3 = st.columns(3)
                 c1.selectbox("From", port_ids, key="cfg_origin", format_func=lambda p: ports[p],
                              on_change=on_voyage, disabled=started)
@@ -409,9 +347,9 @@ def render_ui() -> None:
                              on_change=on_voyage, disabled=started)
                 c3.selectbox("Vessel", list(VESSELS), key="cfg_vessel", format_func=lambda k: VESSELS[k].label,
                              on_change=on_voyage, disabled=started,
-                             help="Bulk carriers use the tanker hull class and LNG carriers the container hull class "
-                                  "for fuel estimates.")
-                b1, b2, b3, b4 = st.columns([1.1, 1, 1, 1.6])
+                             help="Ports and vessel lock once underway (Reset to change). Bulk carriers use the tanker "
+                                  "hull class and LNG carriers the container hull class for fuel estimates.")
+                b1, b2, b3, b4 = st.columns([1.1, 1, 1, 1.4])
                 if ops.playing:
                     b1.button("⏸ Pause", on_click=cb(ops.pause), width="stretch", key="btn_pause")
                 elif v.status == "planned" and v.t == 0:
@@ -425,8 +363,6 @@ def render_ui() -> None:
                 b3.button("Reset", on_click=cb(ops.reset), width="stretch", key="btn_reset")
                 b4.selectbox("Playback (simulated h/s)", list(SPEEDS), key="play_speed", on_change=on_speed,
                              label_visibility="collapsed")
-                if started:
-                    st.caption("Underway: ports and vessel are locked (Reset to change).")
                 dm1, dm2 = st.columns([1.6, 1])
                 dm1.button("↻ Replay hackathon demo" if ops.demo else "▶ Hackathon demo: Suez closure",
                            type="primary", on_click=cb(ops.run_demo, "demo", True), width="stretch", key="demo_run",
@@ -438,22 +374,165 @@ def render_ui() -> None:
                 else:
                     dm2.button("Instant demo", on_click=cb(ops.run_demo, "demo", False), width="stretch",
                                key="demo_instant", help="Same scenario without the time-lapse.")
-                st.markdown('<div class="section-name" style="margin-top:6px">Incidents (simulated)</div>',
-                            unsafe_allow_html=True)
-                t1, t2 = st.columns(2)
-                for i, key in enumerate(("suez_blockage", "bab_el_mandeb_closure", "hormuz_blockade", "panama_closure")):
-                    label = {"suez_blockage": "Suez Canal closed", "bab_el_mandeb_closure": "Bab-el-Mandeb closed",
-                             "hormuz_blockade": "Hormuz closed", "panama_closure": "Panama Canal closed"}[key]
-                    (t1 if i % 2 == 0 else t2).toggle(label, key=f"inc_{key}", on_change=on_incident, args=(key,),
-                                                      help=EVENT_BY_KEY[key].help)
-                st.button("Clear all scenarios", on_click=cb(ops.clear_all), width="stretch", key="btn_clear",
+                i1, i2 = st.columns([3, 1.2])
+                i1.multiselect("Incidents (simulated)", list(P.INCIDENTS), key="inc_picker",
+                               format_func=P.INCIDENTS.get, on_change=on_incident_picker,
+                               placeholder="No incident active",
+                               help="Scenarios are SIMULATED, never real closures. The ship is re-routed from where "
+                                    "it is whenever you add or remove one.")
+                i2.button("Clear all", on_click=cb(ops.clear_all), width="stretch", key="btn_clear",
                           disabled=not describe(ops.settings))
+                with st.expander("Storms, fees and more scenarios", expanded=False):
+                    w1, w2, w3 = st.columns([1, 1, 1.2])
+                    wave = w1.number_input("Wave (m)", 2.0, 15.0, 6.0, 0.5, key="storm_wave")
+                    rad = w2.number_input("Radius (nm)", 100.0, 1000.0, 300.0, 50.0, key="storm_radius")
+                    w3.button("Storm ahead", on_click=cb(ops.add_storm, wave, None, None, rad), width="stretch",
+                              help="Cores of 5 m waves or more are avoided when an alternative exists.")
+                    st.button("Clear storms", on_click=cb(ops.clear_storms), width="stretch",
+                              disabled=not ops.settings["storm_cells"])
+                    st.slider("Red Sea security escalation", 0.0, 1.0, step=0.05, key="inc_red_sea_escalation",
+                              on_change=on_incident, args=("red_sea_escalation",))
+                    st.slider("Taiwan Strait tension", 0.0, 1.0, step=0.05, key="inc_taiwan_tension",
+                              on_change=on_incident, args=("taiwan_tension",))
+                    st.slider("Atlantic hurricane (severity)", 0.0, 1.0, step=0.05, key="inc_atlantic_hurricane",
+                              on_change=on_incident, args=("atlantic_hurricane",))
+                    st.selectbox("Hurricane track", list(HURRICANE_TRACKS), key="inc_hurricane_track",
+                                 format_func=lambda k: HURRICANE_TRACKS[k][0], on_change=on_incident,
+                                 args=("hurricane_track",))
+                    st.slider("Suez fee ×", 1.0, 10.0, step=0.5, key="inc_suez_toll_multiplier",
+                              on_change=on_incident, args=("suez_toll_multiplier",))
+                    st.slider("Panama fee ×", 1.0, 5.0, step=0.5, key="inc_panama_toll_multiplier",
+                              on_change=on_incident, args=("panama_toll_multiplier",))
+                    st.toggle("Panama Canal drought", key="inc_panama_drought", on_change=on_incident,
+                              args=("panama_drought",))
+                    p1, p2 = st.columns(2)
+                    cport = p1.selectbox("Congested port", port_ids, index=port_ids.index(ops.cfg.destination),
+                                         key="cong_port", format_func=lambda p: ports[p])
+                    chrs = p2.number_input("Extra wait (h)", 0.0, 480.0, 48.0, 12.0, key="cong_hours")
+                    st.button("Apply port congestion", on_click=cb(ops.set_congestion, cport, chrs), width="stretch")
+                    preset = st.selectbox("Scenario set", list(PRESETS), key="preset_pick")
+                    st.button("Apply scenario set", on_click=cb(ops.apply_settings, PRESETS[preset],
+                                                                f"preset '{preset}'"), width="stretch")
 
-        with top_r:
-            with st.container(border=True):
-                st.markdown('<div class="panel-title">Alerts & Intelligence</div><div class="panel-sub">Active risks · '
-                            'live weather (Open-Meteo) · news & security headlines (advisory)</div>',
+            # ============ Optimize: objective presets and the economics behind the decision
+            with t_opt:
+                st.radio("Preset", [*ECO.PRESETS, "custom"], key="cfg_preset", horizontal=True, on_change=on_preset,
+                         format_func=lambda k: ECO.PRESETS[k].label if k in ECO.PRESETS else "Custom",
+                         help=" · ".join(f"{p.label}: {p.blurb}" for p in ECO.PRESETS.values())
+                         + " Moving a slider below switches to Custom.")
+                st.slider("Value of time (x)", 1.0, 10.0, step=0.5, key="cfg_tvm", on_change=on_econ,
+                          args=("time_value_mult",),
+                          help="A delayed hour counts this many times its cash cost in the speed and route decision.")
+                st.slider("Carbon price ($/t CO2)", 0.0, 1000.0, step=10.0, key="cfg_carbon", on_change=on_econ,
+                          args=("carbon_usd_per_t",),
+                          help="Decision weight only: it slows the ship and favours cleaner routes but is never "
+                               "added to cash cost.")
+                st.radio("Fuel price source", ["global", "origin_port"], key="cfg_fuelmode", horizontal=True,
+                         on_change=on_econ, args=("fuel_price_mode",),
+                         format_func=lambda k: "Fuel-price setting" if k == "global" else "Departure port (sample)")
+                with st.expander("Advanced", expanded=False):
+                    st.markdown('<div class="section-name">Objective and avoidance</div>', unsafe_allow_html=True)
+                    st.radio("Objective", list(V.PREFERENCES), key="cfg_pref", horizontal=True,
+                             format_func=V.PREFERENCES.get, on_change=on_cfg, args=("preference",),
+                             help=" · ".join(f"{V.PREFERENCES[k]}: {t}" for k, t in V.PREFERENCE_HELP.items()))
+                    if ops.cfg.preference == "balanced":
+                        wc1, wc2, wc3 = st.columns(3)
+                        wc1.slider("Time", 0.0, 3.0, step=0.25, key="cfg_w_time", on_change=on_cfg, args=("weights",))
+                        wc2.slider("Cost", 0.0, 3.0, step=0.25, key="cfg_w_cost", on_change=on_cfg, args=("weights",))
+                        wc3.slider("Risk", 0.0, 3.0, step=0.25, key="cfg_w_risk", on_change=on_cfg, args=("weights",))
+                    st.multiselect("Avoid chokepoints", list(CHOKEPOINTS), key="cfg_avoid", format_func=CHOKEPOINTS.get,
+                                   on_change=on_cfg, args=("avoid",), help="Treated as closed for this voyage.")
+                    st.markdown('<div class="section-name">Carbon, ECA and fuel</div>', unsafe_allow_html=True)
+                    st.toggle("EU ETS (voyages calling at an EU port)", key="cfg_ets_on", on_change=on_econ,
+                              args=("ets_enabled",))
+                    e1, e2 = st.columns(2)
+                    e1.number_input("Allowance ($/t)", 0.0, 400.0, step=5.0, key="cfg_eua", on_change=on_econ,
+                                    args=("eua_usd_per_t",), disabled=not ops.cfg.econ.ets_enabled)
+                    e2.number_input("Coverage (%)", 0.0, 100.0, step=10.0, key="cfg_etsc", on_change=on_econ,
+                                    args=("ets_coverage_pct",), disabled=not ops.cfg.econ.ets_enabled)
+                    st.number_input(f"Bunker price at {ports[ops.cfg.origin]} ($/t, override)", 100.0, 3000.0,
+                                    step=10.0, key="cfg_fuel_ovr", on_change=on_econ, args=("fuel_overrides",),
+                                    disabled=ops.cfg.econ.fuel_price_mode != "origin_port",
+                                    help="SAMPLE price table unless you override it here.")
+                    st.slider("Fuel price ($/t VLSFO)", 300.0, 1600.0, step=10.0, key="cfg_fuel", on_change=on_cfg,
+                              args=("fuel_price",))
+                    lo, hi = HULL[VESSELS[ops.cfg.vessel_key].vessel_type]["speed"]
+                    s1, s2 = st.columns([1, 1.4])
+                    s1.toggle("Fixed speed", key="cfg_fixed_speed", on_change=on_cfg, args=("cruise_speed_kn",),
+                              help="Off: the optimiser picks the best of the vessel's speed options on every lane.")
+                    s2.slider("Cruising speed (kn)", float(lo), float(hi), step=0.5, key="cfg_speed", on_change=on_cfg,
+                              args=("cruise_speed_kn",), disabled=not ops.cfg.cruise_speed_kn)
+                    agent = ops.cfg.agent()
+                    spd = agent.speed_options_kn[len(agent.speed_options_kn) // 2]
+                    from routing_engine import predict_tonnes_per_day
+                    tpd = float(predict_tonnes_per_day(model, agent.vessel_type, spd, agent.draft_m,
+                                                       agent.cargo_weight_t, 15.0, 1.5)[0])
+                    st.caption(md(f"Model estimate at {spd:g} kn, calm sea: **{tpd:,.0f} t/day** "
+                                  f"(≈ ${tpd * ops.cfg.fuel_price / 1e3:,.0f}k/day)."))
+                    st.markdown('<div class="section-name">Voyage and delays</div>', unsafe_allow_html=True)
+                    st.selectbox("Cargo owner", list(V.VESSEL_OWNERS[ops.cfg.vessel_key]), key="cfg_owner",
+                                 format_func=lambda k: f"{CARGO_OWNERS[k].label} · {CARGO_OWNERS[k].cargo}",
+                                 on_change=on_voyage, disabled=started)
+                    d1, d2 = st.columns(2)
+                    d1.date_input("Departure (UTC)", key="cfg_dep_date", on_change=on_cfg, args=("departure",),
+                                  disabled=started)
+                    d2.time_input("Time", key="cfg_dep_time", on_change=on_cfg, args=("departure",), disabled=started,
+                                  step=3600)
+                    q1, q2 = st.columns(2)
+                    q1.number_input("Berth wait (h)", 0.0, 240.0, step=6.0, key="cfg_port_delay",
+                                    on_change=on_cfg, args=("port_delay_hours",))
+                    q2.number_input("Canal delay (h)", 0.0, 240.0, step=6.0, key="cfg_canal_delay",
+                                    on_change=on_cfg, args=("canal_delay_hours",))
+
+            # ============ Route comparison: options side by side, costs, risk, checkpoints, fuel burn
+            with t_cmp:
+                if change:
+                    st.markdown(ui.recommendation(change, v.status, V.PREFERENCES[ops.cfg.preference]),
+                                unsafe_allow_html=True)
+                    st.markdown(ui.comparison_table(change["before"], change["after"],
+                                                    "Before (via Suez)" if ops.demo else "Before",
+                                                    "After closure" if ops.demo else "After"), unsafe_allow_html=True)
+                elif v.status == "blocked":
+                    st.markdown(ui.decision(v.block_reason, True), unsafe_allow_html=True)
+                elif v.decision:
+                    st.markdown(ui.decision(v.decision, rec=v.recommendation), unsafe_allow_html=True)
+                opts = v.candidates if v.candidates else ops.options()
+                if opts:
+                    st.markdown('<div class="section-name">Route options'
+                                + (" (last re-evaluation)" if v.candidates else " (from current position)")
+                                + '</div>', unsafe_allow_html=True)
+                    show_df(pd.DataFrame(P.options_rows(opts)), hide_index=True)
+                    st.caption(f"Objective: {V.PREFERENCES[ops.cfg.preference]}. Model estimates for the remaining "
+                               "voyage.")
+                st.markdown('<div class="section-name">Cost breakdown · every factor, with its data basis</div>',
                             unsafe_allow_html=True)
+                whole = V.summarise(V.build_context(ops.cfg, ops.settings, model), v.legs)
+                st.markdown(ui.cost_breakdown(ECO.breakdown(whole, ops.cfg.econ), whole.co2_t),
+                            unsafe_allow_html=True)
+                st.markdown('<div class="section-name">Risk score · what it means and what drives it</div>',
+                            unsafe_allow_html=True)
+                _, ahead_legs, _ = V.split_at(v, G0)
+                rb_view = RISK.route_risk(ahead_legs if ahead_legs else v.legs)
+                st.markdown(ui.risk_chip(rb_view.score) + " &nbsp;" + ("remaining route" if ahead_legs else "whole voyage"),
+                            unsafe_allow_html=True)
+                st.markdown(ui.risk_panel(rb_view), unsafe_allow_html=True)
+                st.markdown('<div class="section-name">Checkpoints ahead · sea state and source</div>',
+                            unsafe_allow_html=True)
+                cp_rows = P.checkpoint_rows(current_weather())
+                if cp_rows:
+                    show_df(pd.DataFrame(cp_rows), hide_index=True)
+                else:
+                    st.caption("No live checkpoint data right now (offline or beyond the 7-day forecast). The "
+                               "simulator uses its synthetic sea-state model.")
+                burn = P.fuel_burn_series(v.legs)
+                if burn:
+                    st.markdown('<div class="section-name">Fuel burned over the voyage '
+                                '<span class="est">MODEL ESTIMATE</span></div>', unsafe_allow_html=True)
+                    st.line_chart(pd.DataFrame(burn).set_index("Voyage day"), height=180)
+                    st.caption("Cumulative fuel burned by the whole planned voyage. Fuel on board is not modelled.")
+
+            # ============ Alerts & intelligence
+            with t_alert:
                 alerts = []
                 if v.status == "blocked":
                     alerts.append(ui.alert("Voyage blocked", v.block_reason, "critical"))
@@ -483,98 +562,34 @@ def render_ui() -> None:
                             + ("".join(alerts) or ui.alert("All clear", "No warnings for the current voyage.", "info"))
                             + "</div>", unsafe_allow_html=True)
                 intel_slot = st.container(height=300, border=False)
+                st.markdown('<div class="section-name">Risk legend</div>', unsafe_allow_html=True)
+                st.markdown(" ".join(ui.risk_chip(s) for s in (10, 30, 50, 70, 90)) + '<div class="intel-meta" '
+                            'style="margin-top:6px">Hover a chip for what the score means. News headlines are '
+                            'advisory and never change it.</div>', unsafe_allow_html=True)
+                with st.expander("Event timeline", expanded=False):
+                    with st.container(height=260, border=False):
+                        st.markdown(ui.timeline(v.timeline), unsafe_allow_html=True)
 
-        # ---------------- Row 2: Route KPIs (full width, ticks during playback)
-        kpi_fragment(st, ops, ui, V)()
-
-        # ---------------- Row 3: Live route map | Operations copilot
-        map_col, chat_col = st.columns([2.3, 1], gap="medium")
-        with map_col:
-            map_fragment(st, ss, ops, model, ui, V, HAS_FOLIUM, st_folium, build_ops_base_map, build_ops_layer,
-                         build_ops_map_html, components, on_seek, current_weather)()
-        with chat_col:
-            chip = "mode-chip" if llm else "mode-chip cmd"
-            st.markdown(f'<div class="copilot-head"><div class="panel-title">Operations Copilot</div>'
-                        f'<span class="{chip}">{html.escape(llm_label)}</span></div>', unsafe_allow_html=True)
-            with st.container(height=430, border=True):
-                if not ops.chat:
-                    st.markdown(md("Give me instructions (\"Close Suez and reroute my ship\") or ask questions "
-                                   "(\"What if Suez closes?\"). Questions and what-ifs never change the voyage; "
-                                   "what-ifs run on a copy and are labelled PREVIEW."))
-                for m in ops.chat[-40:]:
-                    with st.chat_message(m["role"], avatar="🧭" if m["role"] == "assistant" else "👤"):
-                        if m["role"] == "assistant":
-                            tag = "LLM" if m.get("mode") == "llm" else "rules"
-                            chips = "".join(f'<span class="op-chip">{html.escape(n)}'
-                                            f'{html.escape(json.dumps(a)) if a else ""}</span>' for n, a in m.get("ops", []))
-                            st.markdown(f'<span class="op-chip">{tag}</span>{chips}', unsafe_allow_html=True)
-                        st.markdown(md(m["content"]))
-                        if m.get("rejected"):
-                            st.caption("Rejected (failed validation): " + "; ".join(m["rejected"]))
-            examples = [("Close Suez + reroute", "Close Suez and reroute my ship"),
-                        ("What if Suez closes?", "What if the Suez Canal closes?"),
-                        ("Advance 5 days", "Advance the voyage by 5 days"),
-                        ("6 m storm ahead", "A storm with 6 m waves is affecting our route. Reroute to avoid it."),
-                        ("Safest route?", "What is the safest available route?"),
-                        ("Pause + risk", "Pause the vessel and explain our current operational risk")]
-            ex_cols = st.columns(2)
-            for i, (lab, ex) in enumerate(examples):
-                ex_cols[i % 2].button(lab, key=f"ex_{i}", on_click=on_chat, args=(ex,), width="stretch", help=ex)
-            st.chat_input("Instruction or question…", key="chat_in", on_submit=on_chat)
-
-        # ---------------- Row 4: Rerouting decision & event timeline
-        st.markdown('<div class="panel-title" style="margin-top:14px">Rerouting decision & event timeline</div>'
-                    '<div class="panel-sub">Recommendation, before/after comparison and incident history '
-                    '(model estimates).</div>', unsafe_allow_html=True)
-        d_left, d_right = st.columns([1.35, 1], gap="medium")
-        with d_left:
-            if change:
-                st.markdown(ui.recommendation(change, v.status, V.PREFERENCES[ops.cfg.preference]),
-                            unsafe_allow_html=True)
-                st.markdown(ui.comparison_table(change["before"], change["after"],
-                                                "Before (via Suez)" if ops.demo else "Before",
-                                                "After closure" if ops.demo else "After"), unsafe_allow_html=True)
-            elif v.status == "blocked":
-                st.markdown(ui.decision(v.block_reason, True), unsafe_allow_html=True)
-            elif v.decision:
-                st.markdown(ui.decision(v.decision, rec=v.recommendation), unsafe_allow_html=True)
-            with st.expander("Cost breakdown · every factor, with its data basis", expanded=False):
-                whole = V.summarise(V.build_context(ops.cfg, ops.settings, model), v.legs)
-                st.markdown(ui.cost_breakdown(ECO.breakdown(whole, ops.cfg.econ), whole.co2_t),
-                            unsafe_allow_html=True)
-            with st.expander("Risk score · what it means and what drives it", expanded=False):
-                _, ahead_legs, _ = V.split_at(v, G0)
-                rb_view = RISK.route_risk(ahead_legs if ahead_legs else v.legs)
-                st.markdown(ui.risk_chip(rb_view.score) + " &nbsp;" + ("remaining route" if ahead_legs else "whole voyage"),
-                            unsafe_allow_html=True)
-                st.markdown(ui.risk_panel(rb_view), unsafe_allow_html=True)
-            opts = v.candidates if v.candidates else ops.options()
-            if opts:
-                rows = []
-                for c in opts:
-                    s_ = c.summary
-                    rows.append({"Option": c.name, "Selected": "✓" if c.chosen else "", "Corridor": s_.corridor,
-                                 "Remaining nm": round(s_.nm), "Days": round(s_.hours / 24, 1),
-                                 "All-in $M": round(s_.total_usd / 1e6, 2), "Fuel t": round(s_.fuel_t),
-                                 "Risk /100": round(s_.risk_index), "Risk band": ui.band(s_.risk_index)[0],
-                                 "Forced": "yes" if s_.forced else ""})
-                with st.expander("Route options considered" + (" (last re-evaluation)" if v.candidates
-                                                                else " (from current position)"), expanded=False):
-                    show_df(pd.DataFrame(rows), hide_index=True)
-                    st.caption(f"Objective: {V.PREFERENCES[ops.cfg.preference]} - "
-                               f"{V.PREFERENCE_HELP[ops.cfg.preference]} Model estimates for the remaining voyage.")
-                    if v.decision:
-                        st.caption(md("Full rationale: " + v.decision))
-        with d_right:
-            with st.container(height=360, border=False):
-                st.markdown(ui.timeline(v.timeline), unsafe_allow_html=True)
+            # ============ Data sources: every input behind the plan, with its basis
+            with t_src:
+                src_rows = SRC.plan_sources(ops, ss.get("weather"), ss.get("news"), llm_label)
+                df_src = pd.DataFrame([{"Input": r["input"], "Basis": r["basis"], "Detail": r["detail"],
+                                        "Date": r["date"], "Link": r["url"] or None} for r in src_rows])
+                try:
+                    st.dataframe(df_src, hide_index=True, width="stretch",
+                                 column_config={"Link": st.column_config.LinkColumn("Link")})
+                except TypeError:
+                    show_df(df_src, hide_index=True)
+                st.caption("Basis: live = fetched now · published = a public reference value · estimated = an "
+                           "assumption you can edit · sample = illustrative · simulated = produced by the model · "
+                           "user setting = what you chose.")
+                with st.expander("Methodology and limitations", expanded=False):
+                    st.markdown(ui.METHODOLOGY, unsafe_allow_html=True)
 
     with tab_stress:
         stress_tab(st, ss, ops, model, G0, ports, ui, show_df, HAS_FOLIUM, components, build_folium_map, st_folium,
                    build_map_html, make_agent, profile_matrix, edges_dataframe, HULL, CARGO_OWNERS, np)
 
-    with st.expander("Data sources, model and limitations"):
-        st.markdown(ui.METHODOLOGY, unsafe_allow_html=True)
     st.markdown(ui.FOOTER, unsafe_allow_html=True)
 
     # ----------------------------------------------------------------------------------------------
