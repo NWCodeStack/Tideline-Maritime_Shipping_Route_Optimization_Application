@@ -61,7 +61,37 @@ div[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:10px}
 .stTabs [data-baseweb="tab-list"]{gap:6px;border-bottom:1px solid var(--line)}
 .stTabs [data-baseweb="tab"]{background:transparent;color:#8ba5b8}
 .stTabs [aria-selected="true"]{color:var(--mint)}
-@media(max-width:800px){.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.metric-grid.five{grid-template-columns:repeat(5,minmax(0,1fr))}
+.metric-grid.five .metric{min-height:104px;padding:14px 16px}
+.metric-grid.five .metric-value{font-size:clamp(17px,1.45vw,24px);white-space:nowrap}
+.live-strip{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;background:#081724;border:1px solid var(--line);border-radius:10px;padding:9px 14px;margin:0 0 10px;font-size:11px;color:#9bb5c4}
+.live-strip b{color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}
+.live-badge{display:inline-flex;align-items:center;gap:7px;font-weight:800;letter-spacing:.14em;font-size:10px;color:var(--mint);text-transform:uppercase}
+.live-badge.paused{color:var(--gold)}.live-badge.blocked{color:var(--red)}.live-badge.idle{color:var(--muted)}
+.pulse{width:8px;height:8px;border-radius:50%;background:currentColor;display:inline-block}
+.live-badge.playing .pulse{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+@media (prefers-reduced-motion:reduce){.live-badge.playing .pulse{animation:none}}
+.tl{border-left:2px solid #21374b;margin-left:6px;padding-left:14px}
+.tl-item{position:relative;margin-bottom:12px;font-size:12px;color:#a9c1cf;line-height:1.5}
+.tl-item:before{content:"";position:absolute;left:-20px;top:4px;width:10px;height:10px;border-radius:50%;background:#21374b;border:2px solid var(--bg)}
+.tl-item.reroute:before{background:var(--blue)}.tl-item.blocked:before{background:var(--red)}.tl-item.assessment:before{background:var(--gold)}
+.tl-item.arrival:before,.tl-item.departure:before,.tl-item.plan:before{background:var(--mint)}
+.tl-item b{color:var(--ink);font-size:12px}.tl-meta{font-size:10px;color:#6f8ea0;letter-spacing:.04em}
+.src{font-size:9px;border:1px solid #2a5668;border-radius:4px;padding:0 5px;margin-left:6px;color:#8fd3e6;text-transform:uppercase;letter-spacing:.06em}
+.decision{border:1px solid #2a5668;background:#0c2030;border-radius:10px;padding:12px 14px;font-size:12px;color:#c9dfeb;line-height:1.55;margin-bottom:10px}
+.decision.blocked{border-color:#894351;background:#2a1b24;color:#ffc0c3}
+.copilot-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.mode-chip{font-size:9px;border-radius:4px;padding:2px 7px;border:1px solid #2c8b7b;color:#72f0d5;background:#164c45;letter-spacing:.06em;text-transform:uppercase}
+.mode-chip.cmd{border-color:#2a5668;color:#a9c9d6;background:#112b38}
+.op-chip{display:inline-block;font-size:10px;border:1px solid #284255;background:#0c2030;border-radius:4px;padding:1px 6px;margin:0 4px 4px 0;color:#9bd0e0;font-family:ui-monospace,Consolas,monospace}
+.intel-row{font-size:11px;color:#a9c1cf;line-height:1.5;border-bottom:1px solid #1b3245;padding:7px 0}
+.intel-row a{color:#8fd3e6;text-decoration:none;font-weight:600}.intel-row a:hover{text-decoration:underline}
+.intel-meta{font-size:10px;color:#6f8ea0}
+.sev{font-size:9px;font-weight:800;border-radius:4px;padding:0 5px;letter-spacing:.05em}
+.sev.l0{background:#164c45;color:#72f0d5}.sev.l1{background:#3a2d2c;color:#f6bc87}.sev.l2{background:#47301f;color:#ffb27a}.sev.l3{background:#39232f;color:#ffc0c3}.sev.ln{background:#112b38;color:#829aac}
+@media(max-width:1200px){.metric-grid.five{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:800px){.metric-grid,.metric-grid.five{grid-template-columns:repeat(2,minmax(0,1fr))}}
 """
 
 
@@ -73,8 +103,8 @@ def topbar() -> str:
     return _flat("""
 <div class="topbar"><div class="brand"><div class="brand-mark">
 <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M2 15.7C5.4 9.4 8 17.8 12 12s7.5-5 10-3.5" stroke="#71efdb" stroke-width="2.2" stroke-linecap="round"/><path d="M4 20c3-5 6 0 9-4s5-3 7-2" stroke="#9ad0d4" stroke-width="1.7" stroke-linecap="round"/></svg>
-</div><div>STRESS-TESTER<small>MARITIME ROUTING AGENTS</small></div></div>
-<div class="nav-meta"><span class="status-dot"></span>SIMULATION <span style="color:#527486;margin:0 8px">/</span> SYNTHETIC DATA</div></div>""")
+</div><div>TIDELINE<small>MARITIME OPERATIONS SIMULATOR</small></div></div>
+<div class="nav-meta"><span class="status-dot"></span>SIMULATED VESSELS <span style="color:#527486;margin:0 8px">/</span> LIVE WEATHER &amp; NEWS <span style="color:#527486;margin:0 8px">/</span> SYNTHETIC NETWORK</div></div>""")
 
 
 def intro(events: list[str]) -> str:
@@ -91,7 +121,31 @@ def metric_cards(cards: list[tuple]) -> str:
         f'<div class="metric"><div class="metric-label">{html.escape(l)}</div>'
         f'<div class="metric-value {t}">{html.escape(v)}</div><div class="metric-sub">{html.escape(s)}</div></div>'
         for l, v, s, t in cards)
-    return f'<div class="metric-grid">{inner}</div>'
+    return f'<div class="metric-grid{" five" if len(cards) == 5 else ""}">{inner}</div>'
+
+
+def live_strip(state: str, items: list[tuple]) -> str:
+    """Telemetry row. state in playing | paused | blocked | idle; items: (label, value)."""
+    badge = {"playing": "Simulated live tracking", "paused": "Simulated tracking · paused",
+             "blocked": "Simulated tracking · voyage blocked", "idle": "Simulated tracking · not started"}[state]
+    cells = "".join(f"<span>{html.escape(l)} <b>{html.escape(v)}</b></span>" for l, v in items)
+    return f'<div class="live-strip"><span class="live-badge {state}"><span class="pulse"></span>{badge}</span>{cells}</div>'
+
+
+def timeline(entries: list[dict], limit: int = 14) -> str:
+    if not entries:
+        return '<div class="intel-meta">No events yet.</div>'
+    rows = []
+    for e in list(reversed(entries))[:limit]:
+        src = f'<span class="src">{html.escape(e["source"])}</span>' if e.get("source") else ""
+        rows.append(f'<div class="tl-item {html.escape(e["kind"])}"><div class="tl-meta">VOYAGE DAY {e["t"] / 24:.1f} · '
+                    f'{html.escape(e["at"])} (simulated clock){src}</div><b>{html.escape(e["title"])}</b>'
+                    f'<div>{html.escape(e["detail"])}</div></div>')
+    return '<div class="tl">' + "".join(rows) + "</div>"
+
+
+def decision(text: str, blocked: bool = False) -> str:
+    return f'<div class="decision{" blocked" if blocked else ""}">{html.escape(text)}</div>'
 
 
 def panel_head(title: str, label: str = "") -> str:
@@ -123,9 +177,11 @@ def alert(title: str, body: str, kind: str = "") -> str:
 
 
 METHODOLOGY = _flat("""
-<div class="methodology"><strong>Prototype boundaries.</strong> The network, risk zones, tolls and voyages are synthetic.
-Geometries follow real coastlines and chokepoint bounding boxes, but lanes are simplified waypoint chains, not certified sea lanes.
-Fuel burn comes from a random-forest model trained on 5,000 simulated voyages. Dollar figures are illustrative assumptions.
-Not for navigation, underwriting or insurance decisions.</div>""")
+<div class="methodology"><strong>Prototype boundaries.</strong> Vessel positions are SIMULATED (no AIS feed): the ship moves along the
+modelled lanes at modelled speeds. The network, risk zones, tolls and voyages are synthetic; lanes are simplified waypoint chains that
+follow real coastlines and chokepoints, not certified sea lanes. Fuel burn comes from a random-forest model trained on 5,000 simulated
+voyages; dollar figures and risk indices are illustrative estimates. Disruptions are user-triggered scenarios, never verified closures.
+Weather (Open-Meteo) and headlines (GDELT / Google News) are real external data, shown with their source and fetch time, and are advisory only.
+Not for navigation, safety, underwriting or insurance decisions.</div>""")
 
-FOOTER = '<div class="footer"><span><b>STRESS-TESTER</b> / c0mpiled-14 · UC Berkeley · YC RFS: New Operating Systems for the Physical World</span><span>Synthetic data · demo only</span></div>'
+FOOTER = '<div class="footer"><span><b>TIDELINE</b> / c0mpiled-14 · UC Berkeley · YC RFS: New Operating Systems for the Physical World</span><span>Simulated vessels · modelled estimates · demo only</span></div>'

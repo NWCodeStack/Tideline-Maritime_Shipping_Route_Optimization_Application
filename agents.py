@@ -22,7 +22,7 @@ All dollar figures are illustrative assumptions for the demo, not market quotes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pandas as pd
 
@@ -92,6 +92,22 @@ VESSELS: dict[str, VesselProfile] = {
         description="Slow and heavy: huge cargo value and extreme war-risk premiums make every risky mile "
                     "expensive, while time matters far less.",
     ),
+    # The fuel model was trained on two hull classes; bulk carriers borrow the tanker hull (full-bodied, slow)
+    # and LNG carriers the container hull (fine-lined, fast). Fuel figures for them are labelled as estimates.
+    "bulk": VesselProfile(
+        key="bulk", label="Bulk carrier", vessel_type="Tanker",
+        speed_options_kn=(11.0, 12.5, 14.0), daily_asset_cost_usd=28_000, hull_value_usd=35_000_000,
+        war_risk_aversion=1.5, max_premium_multiple=3.5, toll_tolerance=1.3,
+        description="Capesize-style dry bulk: cheap to run, low-value cargo, avoids tolls where it can. "
+                    "Fuel estimated with the tanker hull class.",
+    ),
+    "lng": VesselProfile(
+        key="lng", label="LNG carrier", vessel_type="Container",
+        speed_options_kn=(16.0, 18.0, 19.5), daily_asset_cost_usd=95_000, hull_value_usd=220_000_000,
+        war_risk_aversion=3.0, max_premium_multiple=3.0, toll_tolerance=0.9,
+        description="High-value gas carrier on a tight delivery window; very war-risk averse. "
+                    "Fuel estimated with the container hull class.",
+    ),
 }
 
 CARGO_OWNERS: dict[str, CargoOwnerProfile] = {
@@ -110,6 +126,24 @@ CARGO_OWNERS: dict[str, CargoOwnerProfile] = {
         cargo_value_usd=78_000_000, late_penalty_usd_per_hr=1_200, toll_weight=1.0,
         description="Pays mostly the cost of capital tied up in the cargo while it is afloat.",
     ),
+    "bulk_trader": CargoOwnerProfile(
+        key="bulk_trader", label="Dry-bulk trader", cargo="Iron ore", cargo_weight_t=150_000,
+        cargo_value_usd=18_000_000, late_penalty_usd_per_hr=300, toll_weight=1.3,
+        description="Low value per tonne: lateness is cheap, tolls are not.",
+    ),
+    "lng_buyer": CargoOwnerProfile(
+        key="lng_buyer", label="LNG utility buyer", cargo="Liquefied natural gas", cargo_weight_t=75_000,
+        cargo_value_usd=70_000_000, late_penalty_usd_per_hr=2_500, toll_weight=0.8,
+        description="Winter supply contract: late cargoes are expensive to replace on the spot market.",
+    ),
+}
+
+# Which cargo owners make sense for each vessel (cargo weight must fit the hull class used by the fuel model).
+VESSEL_OWNERS: dict[str, tuple] = {
+    "container": ("high_margin", "low_margin"),
+    "tanker": ("energy_trader",),
+    "bulk": ("bulk_trader",),
+    "lng": ("lng_buyer",),
 }
 
 
@@ -160,8 +194,12 @@ class RoutingAgent:
         return self.vessel.max_premium_multiple
 
 
-def make_agent(vessel_key: str, owner_key: str) -> RoutingAgent:
-    return RoutingAgent(VESSELS[vessel_key], CARGO_OWNERS[owner_key])
+def make_agent(vessel_key: str, owner_key: str, cruise_speed_kn: float | None = None) -> RoutingAgent:
+    """``cruise_speed_kn`` pins the ship to one speed instead of letting the optimiser pick per lane."""
+    vessel = VESSELS[vessel_key]
+    if cruise_speed_kn:
+        vessel = replace(vessel, speed_options_kn=(float(cruise_speed_kn),))
+    return RoutingAgent(vessel, CARGO_OWNERS[owner_key])
 
 
 # The two ships compared side by side in the app, plus the alternative owner the user can swap in.
@@ -173,7 +211,7 @@ def profile_matrix() -> pd.DataFrame:
     """The behavioural matrices as a table (one column per persona) for display in the UI / README."""
     rows: dict[str, dict] = {}
     for v in VESSELS.values():
-        a = make_agent(v.key, "high_margin" if v.key == "container" else "energy_trader")
+        a = make_agent(v.key, VESSEL_OWNERS[v.key][0])
         rows[v.label] = {
             "Kind": "Vessel operator",
             "Speed options (kn)": " / ".join(f"{s:g}" for s in v.speed_options_kn),

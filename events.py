@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from data_engine import GEO_ZONE, RED_SEA_ZONES, haversine_nm
+from data_engine import GEO_ZONE, RED_SEA_ZONES, WEATHER_BLOCK_THRESHOLD, haversine_nm
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,17 @@ EVENT_CATALOG: list[EventSpec] = [
               help="Draft limit drops to 13.5 m and transit fees rise 2.5x."),
     EventSpec("taiwan_tension", "Taiwan Strait tension", "slider", 0.0, 0.0, 1.0, 0.05,
               help="Raises war-risk in the Taiwan Strait and South China Sea."),
+    EventSpec("bab_el_mandeb_closure", "Bab-el-Mandeb / Red Sea closed", "toggle", False,
+              help="Closes the southern entrance of the Red Sea to all shipping."),
+    EventSpec("panama_closure", "Panama Canal closed", "toggle", False,
+              help="Closes the Panama Canal to all transits."),
+    EventSpec("panama_toll_multiplier", "Panama Canal toll increase", "slider", 1.0, 1.0, 5.0, 0.5,
+              help="Multiplier on the Panama transit fee (x1 = normal)."),
 ]
+# Settings that are not sliders/toggles: storm cells placed by the user or the copilot, and port congestion.
+#   storm_cells:    [{"lat", "lon", "radius_nm", "wave_m", "label", "source"}]
+#   port_congestion: {port_id: extra berth-wait hours}
+STORM_AVOID_WAVE_M = 5.0          # storm cores at or above this significant wave height are avoided if possible
 EVENT_BY_KEY = {e.key: e for e in EVENT_CATALOG}
 
 # Hurricane tracks: (label, centre lat, centre lon, radius nm)
@@ -63,7 +73,8 @@ PRESETS: dict[str, dict] = {
 
 
 def default_settings() -> dict:
-    return {e.key: e.default for e in EVENT_CATALOG} | {"hurricane_track": "cape_verde"}
+    return {e.key: e.default for e in EVENT_CATALOG} | {"hurricane_track": "cape_verde", "storm_cells": [],
+                                                         "port_congestion": {}}
 
 
 def normalise(settings: dict | None) -> dict:
@@ -71,6 +82,11 @@ def normalise(settings: dict | None) -> dict:
     out = default_settings()
     out.update(settings or {})
     return out
+
+
+def wave_to_severity(wave_m: float) -> float:
+    """Inverse of routing_engine.sea_state (wave = 0.8 + 7.5 * w^2): significant wave height -> 0..1 severity."""
+    return float(np.clip(np.sqrt(max(float(wave_m) - 0.8, 0.0) / 7.5), 0.0, 0.97))
 
 
 def describe(settings: dict) -> list[str]:
@@ -91,6 +107,17 @@ def describe(settings: dict) -> list[str]:
         out.append("Panama drought")
     if s["taiwan_tension"] > 0:
         out.append(f"Taiwan tension {s['taiwan_tension']:.0%}")
+    if s["bab_el_mandeb_closure"]:
+        out.append("Bab-el-Mandeb closed")
+    if s["panama_closure"]:
+        out.append("Panama Canal closed")
+    if s["panama_toll_multiplier"] > 1:
+        out.append(f"Panama toll x{s['panama_toll_multiplier']:g}")
+    for c in s["storm_cells"]:
+        out.append(f"Storm {c.get('label', '')} ({c['wave_m']:g} m waves)".replace("  ", " "))
+    for port, hours in s["port_congestion"].items():
+        if hours > 0:
+            out.append(f"Port congestion {port} +{hours:g} h")
     return out
 
 
@@ -150,6 +177,19 @@ def _apply_to_edge(d: dict, s: dict) -> None:
         d["toll_multiplier"] *= 2.5
         d["max_draft_m"] = min(d["max_draft_m"] or 99.0, 13.5)
         ev.append("Panama drought")
+    if d["chokepoint"] == "panama":
+        if s["panama_toll_multiplier"] > 1:
+            d["toll_multiplier"] *= float(s["panama_toll_multiplier"])
+            ev.append(f"Panama toll x{s['panama_toll_multiplier']:g}")
+        if s["panama_closure"]:
+            d["blocked"] = True
+            ev.append("Panama closed")
+    if d["chokepoint"] == "bab_el_mandeb" and s["bab_el_mandeb_closure"]:
+        d["blocked"] = True
+        ev.append("Bab-el-Mandeb closed")
+    if d["mode"] == "sea":
+        for cell in s["storm_cells"]:
+            _apply_storm(d, cell, ev)
     if s["atlantic_hurricane"] > 0 and d["mode"] == "sea":
         _, clat, clon, radius = track
         dist = np.array([haversine_nm(la, lo, clat, clon) for la, lo in zip(d["sample_lat"], d["sample_lon"])])
@@ -163,6 +203,23 @@ def _apply_to_edge(d: dict, s: dict) -> None:
     d["active_events"] = sorted(set(ev))
     _refresh(d)
     d["events_applied"] = True
+
+
+def _apply_storm(d: dict, cell: dict, ev: list) -> None:
+    """A user/copilot-placed storm: raise sea state inside its radius. Cores with waves >= STORM_AVOID_WAVE_M are
+    pushed over the storm-closure threshold, so routing avoids them unless no other route exists."""
+    dist = np.array([haversine_nm(la, lo, cell["lat"], cell["lon"]) for la, lo in zip(d["sample_lat"], d["sample_lon"])])
+    radius = float(cell.get("radius_nm", 300.0))
+    inside = dist < radius
+    if not inside.any():
+        return
+    sev = wave_to_severity(cell["wave_m"]) * (1.0 - 0.35 * (dist / radius) ** 2)
+    if cell["wave_m"] >= STORM_AVOID_WAVE_M:
+        sev = np.where(dist < 0.75 * radius, np.maximum(sev, WEATHER_BLOCK_THRESHOLD + 0.02), sev)
+    w = d["weather_samples"].copy()
+    w[inside] = np.maximum(w[inside], sev[inside])
+    d["weather_samples"] = w
+    ev.append(f"Storm {cell.get('label', '')}".strip())
 
 
 def stress_edge(edge_data: dict, settings: dict | None) -> dict:
