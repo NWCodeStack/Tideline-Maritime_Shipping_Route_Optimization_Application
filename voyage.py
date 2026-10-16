@@ -466,6 +466,28 @@ def nearest_reachable_port(G: nx.Graph, H: nx.DiGraph, start: str, dest: str) ->
     return best, haversine_nm(G.nodes[best]["lat"], G.nodes[best]["lon"], d["lat"], d["lon"])
 
 
+def reachable_ports(ctx: Context, pos: Position) -> set[str]:
+    """Ports the ship could still sail to from ``pos`` with the current hard closures (storm and insurance soft
+    blocks are ignored: they can be forced through). A ship part-way along a lane can go on to the next node, or turn
+    back to the previous one unless it is inside a canal."""
+    G = ctx.G
+    H = nx.DiGraph()
+    H.add_nodes_from(G.nodes)
+    for key, c in ctx.costs.items():
+        if not c.hard_block:
+            u, v = tuple(key)
+            H.add_edge(u, v)
+            H.add_edge(v, u)
+    if pos.node is not None:
+        starts = [pos.node]
+    else:
+        starts = [pos.y] + ([] if G.edges[pos.x, pos.y]["mode"] == "canal" else [pos.x])
+    reach: set[str] = set()
+    for s in starts:
+        reach |= {s} | nx.descendants(H, s)
+    return {n for n in reach if G.nodes[n]["kind"] == "port"}
+
+
 def route_from(ctx: Context, pos: Position, dest: str, pref: str, via: str | None = None,
                add_berth: bool = True, prev_lane: tuple[str, str] | None = None) -> RouteSummary:
     """Best route from ``pos`` to ``dest`` under ``pref``. Strict pass first (no storm-closed / over-premium lanes),

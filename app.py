@@ -652,6 +652,8 @@ def map_fragment(st, ss, ops, model, ui, V, has_folium, st_folium, build_base, b
                  on_seek, current_weather):
     import json
 
+    import panels as P
+
     @st.fragment(run_every=TICK_S if ops.playing else None)
     def live_map():
         was_playing = ops.playing
@@ -678,10 +680,12 @@ def map_fragment(st, ss, ops, model, ui, V, has_folium, st_folium, build_base, b
             base_key = json.dumps(ops.settings, sort_keys=True, default=str)
             if ss.get("_base_key") != base_key:             # static layers rebuilt only when scenarios change
                 ctx = V.build_context(ops.cfg, ops.settings, model)
-                ss["_base_map"] = build_base(ctx.G, ops.settings)
+                ss["_base_map"] = build_base(ctx.G, ops.settings, hazards=P.hazard_zones(ctx.G, V.base_graph()))
                 ss["_base_key"] = base_key
             wx = current_weather() or {}
-            layer = build_layer(G, v, done_pts, ahead_pts, wps, s, alts, wx.get("points", []), color)
+            warns = P.port_warnings(V.build_context(ops.cfg, ops.settings, model), s.pos, ops.settings, G)
+            layer = build_layer(G, v, done_pts, ahead_pts, wps, s, alts, wx.get("points", []), color,
+                                port_warnings=warns)
             base = ss["_base_map"]
             out = st_folium(base, feature_group_to_add=layer, key="ops_map", height=520,
                             use_container_width=True, returned_objects=["last_object_clicked"])

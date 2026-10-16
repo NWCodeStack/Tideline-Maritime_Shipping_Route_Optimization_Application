@@ -12,6 +12,7 @@ import folium
 
 from data_engine import GEO_ZONE, RED_SEA_ZONES
 from events import HURRICANE_TRACKS, normalise
+from panels import hazard_tooltip
 
 BLUE, AMBER, RED, STORM = "#2f80ed", "#f5a623", "#e5534b", "#a78bfa"
 VESSEL_COLORS = {"Container": BLUE, "Tanker": AMBER}
@@ -122,17 +123,32 @@ MINT, MUTED, ALT = "#4de0c8", "#829aac", "#f5bf75"
 SEV_COLORS = {0: "#4de0c8", 1: "#f5bf75", 2: "#ff9f5a", 3: "#fe7d81"}
 
 
-def build_ops_base_map(G, settings: dict, center=(25.0, 40.0), zoom: int = 2) -> folium.Map:
+HAZARD_COLORS = {"mint": MINT, "blue": BLUE, "gold": AMBER, "red": RED}
+HAZARD_FILL = {"Low": 0.04, "Guarded": 0.10, "Elevated": 0.16, "High": 0.22, "Severe": 0.28}
+
+
+def _hazard_layer(zones) -> folium.FeatureGroup:
+    """Security zones tinted by their current risk band (SIMULATED levels), toggleable from the layer control."""
+    fg = folium.FeatureGroup(name="Hazard zones (risk band)", show=True)
+    for z in zones:
+        la0, la1, lo0, lo1 = z["bounds"]
+        color = HAZARD_COLORS[z["tone"]]
+        folium.Rectangle([[la0, lo0], [la1, lo1]], color=color, weight=1, opacity=0.6, fill=True, fill_color=color,
+                         fill_opacity=HAZARD_FILL[z["band"]], tooltip=hazard_tooltip(z)).add_to(fg)
+    return fg
+
+
+def build_ops_base_map(G, settings: dict, center=(25.0, 40.0), zoom: int = 2, hazards=()) -> folium.Map:
+    """Static base: network, scenario zones, hazard zones and ports. Anything that depends on where the ship is
+    (port warnings) is in the per-tick voyage layer instead, so this map is rebuilt only when scenarios change."""
     s = normalise(settings)
     m = folium.Map(location=list(center), zoom_start=zoom, min_zoom=2, tiles=DARK_TILES, attr=DARK_ATTR,
                    max_zoom=12, world_copy_jump=True, control_scale=True)
     _network_layers(m, G, s)
-    for port, hours in s.get("port_congestion", {}).items():
-        if port in G and hours > 0:
-            d = G.nodes[port]
-            folium.CircleMarker([d["lat"], d["lon"]], radius=11, color=AMBER, weight=2, fill=False,
-                                tooltip=f"{d['name']}: congestion +{hours:g} h (scenario)").add_to(m)
+    if hazards:
+        _hazard_layer(hazards).add_to(m)
     _ports(m, G)
+    folium.LayerControl(collapsed=True).add_to(m)
     return m
 
 
@@ -145,9 +161,14 @@ def _ship_icon(course: float, status: str) -> folium.DivIcon:
 
 
 def build_ops_layer(G, voyage, done_pts, ahead_pts, waypoints, ship, candidates_pts=(), weather_pts=(),
-                    route_color=BLUE) -> folium.FeatureGroup:
-    """Everything that moves: completed track, remaining route, abandoned / blocked routes, alternatives, ship."""
+                    route_color=BLUE, port_warnings=()) -> folium.FeatureGroup:
+    """Everything that moves: completed track, remaining route, abandoned / blocked routes, alternatives, port
+    warnings (they depend on where the ship is), ship."""
     fg = folium.FeatureGroup(name="Voyage")
+    for w in port_warnings:
+        color = RED if w["kind"] == "unreachable" else AMBER
+        folium.CircleMarker([w["lat"], w["lon"]], radius=11, color=color, weight=2, fill=False,
+                            tooltip=w["detail"]).add_to(fg)
     for name, pts in candidates_pts:
         if len(pts) > 1:
             folium.PolyLine(unwrap(pts), color=ALT, weight=2, opacity=0.55, dash_array="1 7",

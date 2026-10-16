@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import html
 
+import numpy as np
+
 import ui
+import voyage as V
+from data_engine import GEOPOLITICAL_ZONES
 
 # The four headline incidents shown in the compact picker (the other scenarios live under "More scenarios").
 INCIDENTS = {
@@ -70,6 +74,53 @@ def checkpoint_rows(weather: dict | None) -> list[dict]:
                      "Sea state": p.get("severity", "n/a"),
                      "Source": "live forecast (Open-Meteo)" if live else p.get("status", "n/a")})
     return rows
+
+
+def hazard_zones(G, base) -> list[dict]:
+    """Every security zone with its CURRENT level, split into the base level and what scenarios added, and the band
+    that level falls in (score = 100 x level, the same bands as the route risk score). ``G`` is the stressed graph,
+    ``base`` the calm one; the level is the highest lane sample inside the zone, as in the risk breakdown."""
+    out = []
+    for z in GEOPOLITICAL_ZONES:
+        cur = bas = None
+        for u, v, d in G.edges(data=True):
+            m = z.contains(d["sample_lat"], d["sample_lon"])
+            if m.any():
+                c = float(np.max(d["geo_samples"][m]))
+                b = float(np.max(base.edges[u, v]["geo_samples_base"][m]))
+                cur = c if cur is None else max(cur, c)
+                bas = b if bas is None else max(bas, b)
+        if cur is None:                                   # no lane crosses this zone: report its baseline
+            cur = bas = z.baseline
+        score = round(100 * cur)
+        label, tone = ui.band(score)
+        out.append({"key": z.key, "label": z.label, "bounds": (z.lat_min, z.lat_max, z.lon_min, z.lon_max),
+                    "security": cur, "base": bas, "scenario": max(cur - bas, 0.0), "score": score,
+                    "band": label, "tone": tone})
+    return out
+
+
+def hazard_tooltip(z: dict) -> str:
+    return (f"{z['label']}: {z['band']} · security {z['security']:.2f} (base {z['base']:.2f} + scenario "
+            f"{z['scenario']:.2f}). SIMULATED levels, not a live security assessment.")
+
+
+def port_warnings(ctx, pos, settings: dict, G) -> list[dict]:
+    """Ports to flag on the map: no sea passage from the ship's position (closures), or a congestion scenario.
+    There is no 'too shallow for this ship' warning: Tideline has no port-draft data and none is invented."""
+    reach = V.reachable_ports(ctx, pos)
+    out = []
+    for n, d in G.nodes(data=True):
+        if d["kind"] != "port":
+            continue
+        hours = float(settings.get("port_congestion", {}).get(n, 0.0))
+        if n not in reach:
+            out.append({"port": n, "name": d["name"], "lat": d["lat"], "lon": d["lon"], "kind": "unreachable",
+                        "detail": f"{d['name']}: no sea passage from the ship's position (SIMULATED closure)."})
+        elif hours > 0:
+            out.append({"port": n, "name": d["name"], "lat": d["lat"], "lon": d["lon"], "kind": "congested",
+                        "detail": f"{d['name']}: congestion +{hours:g} h berth wait (SIMULATED scenario)."})
+    return out
 
 
 def status_line(recommendation: str, corridor: str, risk_score: float) -> str:
