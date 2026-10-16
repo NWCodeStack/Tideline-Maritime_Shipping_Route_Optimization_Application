@@ -18,6 +18,7 @@ import voyage as V
 from data_engine import CHOKEPOINTS, NODE_DEFS
 from economics import PRESETS, apply_preset
 from events import EVENT_BY_KEY, STORM_AVOID_WAVE_M, default_settings, describe
+from risk import explain as risk_explain, route_risk
 
 PORTS = {k: v[0] for k, v in NODE_DEFS.items() if v[3] == "port"}
 
@@ -573,11 +574,13 @@ class Ops:
                         f"war-risk {d['geopolitical_peak']:.2f}" if d["geopolitical_peak"] >= 0.25 else
                         f"sea state {d['weather_peak']:.2f}")
                     hot.append(f"{seg} ({why})")
-            return (head + f" Remaining-route risk index {p['remaining_risk_index']:.0f}/100 "
-                           f"({V.risk_label(p['remaining_risk_index'])}); whole-voyage {p['risk_index']:.0f}/100. "
+            rb = p["remaining_risk"] if ahead else route_risk(v.legs)       # nothing ahead once arrived
+            scope = "Remaining-route" if ahead else "Whole-voyage"
+            return (head + f" {scope} risk score {rb.score}/100 ({rb.band_label}); "
+                           f"whole-voyage {p['risk_index']:.0f}/100. {risk_explain(rb)} "
                     + (f"Exposed segments ahead: {'; '.join(hot[:5])}. " if hot else "No elevated segments ahead. ")
                     + (f"Active scenarios: {', '.join(active)}. " if active else "No active scenarios. ")
-                    + "Risk index = hours-weighted (geopolitical + 0.5 x weather) exposure; synthetic risk model.")
+                    + "Synthetic risk model, SIMULATED inputs.")
         if topic == "options":
             opts = self.options()
             if not opts:

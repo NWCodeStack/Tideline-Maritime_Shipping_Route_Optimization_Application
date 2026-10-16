@@ -387,7 +387,7 @@ class TestOpsHelpers(unittest.TestCase):
         self.assertEqual(self.o.cfg.preference, "cheapest")
 
     def test_explain_topics(self):
-        for topic, needle in (("eta", "ETA"), ("cost", "Projected all-in"), ("risk", "risk index"),
+        for topic, needle in (("eta", "ETA"), ("cost", "Projected all-in"), ("risk", "risk score"),
                               ("options", "Routes from the current position"), ("status", "SIMULATED position")):
             self.assertIn(needle, self.o.explain(topic), topic)
 

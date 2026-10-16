@@ -92,6 +92,7 @@ def render_ui() -> None:
     import copilot
     import intel
     import economics as ECO
+    import risk as RISK
     import ui
     import voyage as V
     from agents import CARGO_OWNERS, VESSELS, make_agent, profile_matrix
@@ -541,6 +542,12 @@ def render_ui() -> None:
                 whole = V.summarise(V.build_context(ops.cfg, ops.settings, model), v.legs)
                 st.markdown(ui.cost_breakdown(ECO.breakdown(whole, ops.cfg.econ), whole.co2_t),
                             unsafe_allow_html=True)
+            with st.expander("Risk score · what it means and what drives it", expanded=False):
+                _, ahead_legs, _ = V.split_at(v, G0)
+                rb_view = RISK.route_risk(ahead_legs if ahead_legs else v.legs)
+                st.markdown(ui.risk_chip(rb_view.score) + " &nbsp;" + ("remaining route" if ahead_legs else "whole voyage"),
+                            unsafe_allow_html=True)
+                st.markdown(ui.risk_panel(rb_view), unsafe_allow_html=True)
             opts = v.candidates if v.candidates else ops.options()
             if opts:
                 rows = []
@@ -549,7 +556,8 @@ def render_ui() -> None:
                     rows.append({"Option": c.name, "Selected": "✓" if c.chosen else "", "Corridor": s_.corridor,
                                  "Remaining nm": round(s_.nm), "Days": round(s_.hours / 24, 1),
                                  "All-in $M": round(s_.total_usd / 1e6, 2), "Fuel t": round(s_.fuel_t),
-                                 "Risk /100": round(s_.risk_index), "Forced": "yes" if s_.forced else ""})
+                                 "Risk /100": round(s_.risk_index), "Risk band": ui.band(s_.risk_index)[0],
+                                 "Forced": "yes" if s_.forced else ""})
                 with st.expander("Route options considered" + (" (last re-evaluation)" if v.candidates
                                                                 else " (from current position)"), expanded=False):
                     show_df(pd.DataFrame(rows), hide_index=True)
@@ -611,8 +619,8 @@ def kpi_fragment(st, ops, ui, V):
                  ("Projected cost", ui._usd(p["total_usd"]),
                   f"fuel {p['fuel_t']:,.0f} t · tolls {ui._usd(p['toll_usd'])} · spent {ui._usd(p['spent_usd'])}",
                   "gold", True),
-                 ("Risk ahead", f"{risk:.0f}/100", V.risk_label(risk) + " (synthetic risk model)",
-                  "red" if risk >= 65 else "gold" if risk >= 45 else "mint", True)]
+                 ("Risk ahead", f"{risk:.0f}/100", f"{V.risk_label(risk)} · hover for what this means",
+                  ui.band(risk)[1], True, ui.RISK_CAPTION)]
         st.markdown(ui.metric_cards(cards), unsafe_allow_html=True)
         state = ("blocked" if v.status == "blocked" else "playing" if ops.playing else
                  "idle" if v.status == "planned" and v.t == 0 else "paused")

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 
+from risk import BANDS as RISK_BANDS, BASIS as RISK_BASIS, CAPTION as RISK_CAPTION, band
 from routing_engine import Comparison, RouteResult, _usd, route_label
 
 MINT, GOLD, RED, BLUE = "#4de0c8", "#f5bf75", "#fe7d81", "#58aaff"
@@ -113,6 +114,8 @@ div[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:10px}
 .demo-table td.basis{font-size:11.5px;color:#8ba5b8;font-variant-numeric:normal}
 .demo-table tr.tot td{border-top:1px solid #2a5668;color:#e8f3fa}
 .demo-table tr.weight td{color:#b7a7e6}
+.rchip{display:inline-block;font-size:12px;font-weight:700;border:1px solid currentColor;border-radius:999px;padding:1px 9px;cursor:help}
+.rchip.mint{color:var(--mint)}.rchip.blue{color:var(--blue)}.rchip.gold{color:var(--gold)}.rchip.red{color:var(--red)}
 .tag-sim{font-size:11px;font-weight:800;letter-spacing:.06em;color:#ffd8a8;border:1px solid #7c5640;border-radius:4px;padding:0 5px}
 .tag-live{font-size:11px;font-weight:800;letter-spacing:.06em;color:#72f0d5;border:1px solid #2c8b7b;border-radius:4px;padding:0 5px}
 @media(max-width:700px){.topbar{margin-bottom:6px}.brand{font-size:17px}.metric-value{font-size:22px}}
@@ -139,12 +142,13 @@ def topbar(state: str = "idle", llm_label: str = "") -> str:
 
 
 def metric_cards(cards: list[tuple]) -> str:
-    """cards: (label, value, sub, tone[, estimate]) with tone in {"", "mint", "gold", "red", "blue"}."""
+    """cards: (label, value, sub, tone[, estimate[, tooltip]]) with tone in {"", "mint", "gold", "red", "blue"}."""
     out = []
     for c in cards:
         l, v, s, t = c[:4]
         est = '<span class="est">MODEL ESTIMATE</span>' if len(c) > 4 and c[4] else ""
-        out.append(f'<div class="metric"><div class="metric-label">{html.escape(l)}{est}</div>'
+        tip = f' title="{html.escape(c[5], quote=True)}"' if len(c) > 5 and c[5] else ""
+        out.append(f'<div class="metric"{tip}><div class="metric-label">{html.escape(l)}{est}</div>'
                    f'<div class="metric-value {t}">{html.escape(v)}</div><div class="metric-sub">{html.escape(s)}</div></div>')
     return f'<div class="metric-grid">{"".join(out)}</div>'
 
@@ -178,7 +182,8 @@ def _deltas(before: dict, after: dict) -> list[tuple[str, str, bool]]:
             ("Distance", f"{after['nm'] - before['nm']:+,.0f} nm", after["nm"] > before["nm"] + 1),
             ("Fuel", f"{after['fuel_t'] - before['fuel_t']:+,.0f} t", after["fuel_t"] > before["fuel_t"] + 1),
             ("Cost", ("+" if dc >= 0 else "−") + _usd(abs(dc)), dc > 1000),
-            ("Risk ahead", f"{before['risk']:.0f} → {after['risk']:.0f}", after["risk"] > before["risk"] + 0.5)]
+            ("Risk ahead", f"{before['risk']:.0f} {band(before['risk'])[0]} → {after['risk']:.0f} "
+                           f"{band(after['risk'])[0]}", after["risk"] > before["risk"] + 0.5)]
 
 
 def change_banner(change: dict, demo: bool = False) -> str:
@@ -235,6 +240,30 @@ def decision(text: str, blocked: bool = False, rec: str = "") -> str:
     """Decision card; ``rec`` ("stay" | "change_course") tints it so the recommendation reads at a glance."""
     kind = " blocked" if blocked else {"stay": " stay", "change_course": " change"}.get(rec, "")
     return f'<div class="decision{kind}">{html.escape(text)}</div>'
+
+
+def risk_chip(score: float) -> str:
+    """Colour chip "27 · Guarded"; hovering shows what the score means."""
+    label, tone = band(score)
+    return (f'<span class="rchip {tone}" title="{html.escape(RISK_CAPTION, quote=True)}">'
+            f'{round(score)} · {html.escape(label)}</span>')
+
+
+def risk_panel(rb) -> str:
+    """The risk score explained: caption, bands, and the parts that add up to the total."""
+    esc = html.escape
+    rows = "".join(f'<tr><td>{n}</td><td>{100 * v:.1f} pts</td><td class="basis">{esc(RISK_BASIS[k])}</td></tr>'
+                   for n, k, v in (("Weather", "weather", rb.weather), ("Security", "security", rb.security),
+                                   ("Traffic", "traffic", rb.traffic)))
+    rows += (f'<tr class="tot"><td><b>Risk score</b></td><td><b>{rb.score}/100 · {esc(rb.band_label)}</b></td>'
+             f'<td class="basis">parts above add up to the score</td></tr>')
+    bands = " · ".join(f"{start}+ {esc(lab)}" for start, lab, _ in RISK_BANDS)
+    top = (f'<div class="intel-meta" style="margin-top:6px">Highest-security lane: <b>{esc(rb.top_zone)}</b>: '
+           f'security {rb.top_security:.2f} (base {rb.top_base:.2f} + scenario {rb.top_scenario:.2f}). '
+           f'News headlines are advisory and do not change the score.</div>') if rb.top_zone else ""
+    return (f'<div class="intel-meta" style="margin-bottom:6px">{esc(RISK_CAPTION)}</div>'
+            f'<table class="demo-table"><tr><th>Signal</th><th>Share of score</th><th>Basis</th></tr>{rows}</table>'
+            f'{top}<div class="intel-meta" style="margin-top:6px">Bands: {bands}.</div>')
 
 
 def cost_breakdown(lines: list[dict], co2_t: float) -> str:

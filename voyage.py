@@ -35,6 +35,7 @@ from agents import CARGO_OWNERS, VESSEL_OWNERS, VESSELS, RoutingAgent, make_agen
 from data_engine import CHOKEPOINTS, build_maritime_graph, haversine_nm
 from economics import Economics, effective_fuel_price, ets_applies
 from events import apply_events, describe, normalise
+from risk import TRAFFIC_FULL_RISK_DELAY_H, WEATHER_WEIGHT, band, route_risk
 from routing_engine import DEFAULT_FUEL_PRICE_USD_PER_T, FUEL_MODEL, EdgeCost, price_edge_batch
 
 PREFERENCES = {
@@ -54,8 +55,7 @@ FORCED_PENALTY = 2.0               # a route through storm-closed / over-premium
 REROUTE_TOLERANCE = 0.005          # keep the current route unless the alternative is >0.5% better
 CHANGE_COURSE_THRESHOLD_USD = 25_000   # a different route must beat staying by this much all-in (hysteresis)
 TURN_PENALTY_H = 4.0               # time to bring the ship about and settle on the reverse heading (simulated)
-SAFEST_SWITCH_RISK_POINTS = 5.0    # "safest" objective: switch if the new route is this much less risky
-RISK_SCALE = 0.6                    # hours-weighted (geo + 0.5 wx) of 0.6 maps to risk index 100
+SAFEST_SWITCH_RISK_POINTS = 3.0    # "safest" objective: switch if the new route's 0-100 risk score is this much lower
 
 
 # --------------------------------------------------------------------------------------------------
@@ -113,6 +113,11 @@ class Leg:
     co2_t: float = 0.0
     carbon_usd: float = 0.0    # carbon shadow price x CO2: a decision weight, NOT cash
     speed_kn: float = 0.0      # speed through the water the optimiser chose for this lane
+    p_sec_base: float = 0.0    # risk signals of this lane (0..1), see risk.py: base security level of its zones,
+    p_sec_scen: float = 0.0    # what a simulated scenario added on top,
+    p_wx: float = 0.0          # weather (half the lane's sea-state severity),
+    p_traf: float = 0.0        # and the simulated canal slowdown
+    zone: str = ""             # human label of the lane (chokepoint name, else "A - B")
 
     @property
     def hours(self) -> float:
@@ -347,7 +352,17 @@ def _make_leg(ctx: Context, x: str, y: str, f0: float, f1: float, entered: bool,
                risk=sea_h * (d["geopolitical_risk"] + 0.5 * d["weather_risk"]), chokepoint=d["chokepoint"],
                note=c.soft_block or "", entered=entered, queued_h=queued_h,
                eca_usd=c.eca_usd * frac, ets_usd=c.ets_usd * frac, co2_t=c.co2_t * frac,
-               carbon_usd=c.carbon_usd * frac, speed_kn=c.speed_kn)
+               carbon_usd=c.carbon_usd * frac, speed_kn=c.speed_kn, **_risk_signals(ctx, x, y, d))
+
+
+def _risk_signals(ctx: Context, x: str, y: str, d: dict) -> dict:
+    """The lane's inputs to the risk score (risk.py), with the scenario part of security kept apart from its base."""
+    base = base_graph().edges[x, y]["geopolitical_risk"]
+    G = ctx.G
+    traffic = (min(ctx.config.canal_delay_hours / TRAFFIC_FULL_RISK_DELAY_H, 1.0) if d["mode"] == "canal" else 0.0)
+    return {"p_sec_base": base, "p_sec_scen": max(d["geopolitical_risk"] - base, 0.0),
+            "p_wx": WEATHER_WEIGHT * d["weather_risk"], "p_traf": traffic,
+            "zone": CHOKEPOINTS.get(d["chokepoint"]) or f"{G.nodes[x]['name']} - {G.nodes[y]['name']}"}
 
 
 def _turn_leg(ctx: Context, leg: Leg, extra_h: float = TURN_PENALTY_H) -> Leg:
@@ -406,15 +421,14 @@ def summarise(ctx: Context, legs: list, label: str = "", forced: bool = False) -
                     seen.append(CHOKEPOINTS[ck])
             if ctx.G.has_edge(l.x, l.y):
                 peak = max(peak, ctx.G.edges[l.x, l.y]["geopolitical_peak"])
-    sea_h = sum(l.sea_h for l in legs)
-    s.risk_index = min(100.0, 100.0 * sum(l.risk for l in legs) / max(sea_h, 1e-9) / RISK_SCALE)
+    s.risk_index = 100.0 * route_risk(legs).total
     s.peak_premium = premium_multiple(peak)
     s.chokepoints = seen
     return s
 
 
 def risk_label(idx: float) -> str:
-    return "Low" if idx < 25 else "Moderate" if idx < 45 else "Elevated" if idx < 65 else "High"
+    return band(idx)[0]
 
 
 # --------------------------------------------------------------------------------------------------
@@ -964,17 +978,15 @@ def projected(v: Voyage, G: nx.Graph) -> dict:
     """Totals for the whole voyage (sailed + remaining) and for the remaining part alone."""
     done, ahead, _ = split_at(v, G)
     tot = lambda legs, k: sum(getattr(l, k) for l in legs)
-    sea_h = tot(v.legs, "sea_h")
     out = {k: tot(v.legs, k) for k in ("nm", "fuel_t", "fuel_usd", "toll_usd", "war_usd", "time_usd", "eca_usd",
                                        "ets_usd", "co2_t", "carbon_usd")}
     out["total_usd"] = sum(l.total_usd for l in v.legs)
     out["remaining_usd"] = sum(l.total_usd for l in ahead)
     out["spent_usd"] = sum(l.total_usd for l in done)
     out["remaining_fuel_t"] = tot(ahead, "fuel_t")
-    out["risk_index"] = min(100.0, 100.0 * tot(v.legs, "risk") / max(sea_h, 1e-9) / RISK_SCALE)
-    ahead_sea = tot(ahead, "sea_h")
-    out["remaining_risk_index"] = (min(100.0, 100.0 * tot(ahead, "risk") / max(ahead_sea, 1e-9) / RISK_SCALE)
-                                   if ahead_sea > 0 else 0.0)
+    out["risk_index"] = 100.0 * route_risk(v.legs).total
+    out["remaining_risk"] = route_risk(ahead)
+    out["remaining_risk_index"] = 100.0 * out["remaining_risk"].total
     out["eta"] = calendar(v, v.total_hours)
     return out
 
