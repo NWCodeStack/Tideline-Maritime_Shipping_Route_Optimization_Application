@@ -53,6 +53,7 @@ create_voyage(origin, destination, vessel?, start?) start() pause() resume() res
 set_disruption(name, active?, value?) add_storm(wave_m?, radius_nm?) clear_storms() clear_disruptions()
 set_congestion(port, hours) reroute(preference?, via?) set_preference(preference) set_fuel_price(price? | change_pct?)
 set_speed(knots) compare_route(via) explain(topic: status|eta|cost|risk|options) weather() news(region?)
+run_demo() exit_demo()
 Ports are the 3-letter ids listed in the state. Vessels: container, tanker, bulk, lng.
 Disruption names: suez_closure, bab_el_mandeb_closure, hormuz_closure, panama_closure, red_sea_escalation,
 taiwan_tension, suez_fee, panama_fee, panama_drought. Preferences: fastest, cheapest, safest, balanced.

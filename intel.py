@@ -164,6 +164,41 @@ def assess_weather(raw: dict, points: list[dict], departure: datetime) -> dict:
             "source": "Open-Meteo Marine API + Open-Meteo Forecast API (wind)"}
 
 
+def operational_impact(wave_m: float | None, wind_kn: float | None = None) -> str:
+    """Estimated effect on a ship using the SAME physics the routing engine uses (modelled, not measured):
+    speed over ground x (1 - 0.5 w^2) with w the sea-state severity, fuel burn x (1 + 0.012 wave^2 + 0.0002 wind^2)."""
+    if wave_m is None:
+        return ""
+    from events import wave_to_severity
+    w = wave_to_severity(wave_m)
+    speed_loss = 0.5 * w ** 2 * 100
+    fuel_up = (0.012 * wave_m ** 2 + 0.0002 * (wind_kn or 0.0) ** 2) * 100
+    return f"model estimate: ~{speed_loss:.0f}% speed loss, ~{fuel_up:.0f}% more fuel per day at sea"
+
+
+def with_route(w: dict, route_sig: str, coords: tuple) -> dict:
+    """Tag an assessment with the itinerary and sample points it was computed for."""
+    return dict(w, route_sig=route_sig, coords=coords)
+
+
+def reuse_or_unavailable(last: dict | None, route_sig: str, error: str) -> dict:
+    """After a failed refresh: reuse the last good assessment ONLY if it belongs to the same itinerary (and so the
+    same locations and ETAs). A forecast for a superseded route or another voyage is never shown as current."""
+    if last and last.get("route_sig") == route_sig:
+        return dict(last, stale=True,
+                    note=f"Live refresh failed ({error}); showing the last successful forecast for this route, "
+                         f"fetched {last['fetched_at']} UTC.")
+    note = f"Weather unavailable: {error}."
+    if last:
+        note += " (A cached forecast exists for a previous route and is not shown.)"
+    return weather_unavailable(note)
+
+
+def current_for(w: dict | None, route_sig: str) -> dict | None:
+    """The stored assessment if it matches the current itinerary, else None (used by map markers/alerts/copilot)."""
+    return w if w and w.get("route_sig") == route_sig else None
+
+
 def weather_unavailable(error: str) -> dict:
     return {"status": "unavailable", "points": [], "worst": None, "near_ship": None, "fetched_at": None,
             "units": {}, "note": error, "source": "Open-Meteo"}

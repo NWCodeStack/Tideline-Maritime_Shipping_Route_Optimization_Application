@@ -229,10 +229,15 @@ class Test5ChatbotControlsMap(unittest.TestCase):
                 return None
 
         o = Ops()
-        reply = C.handle("please do the needful", o, llm=FakeLLM())
+        reply = C.handle("Please move the clock along a bit", o, llm=FakeLLM())   # explicit instruction
         self.assertEqual([n for n, *_ in reply.ops], ["advance"])
         self.assertEqual(len(reply.rejected), 1)
         self.assertAlmostEqual(o.voyage.t, 24.0)
+        # the same LLM proposal for an ambiguous message is held by the intent gate
+        o2 = Ops()
+        reply = C.handle("the needful", o2, llm=FakeLLM())
+        self.assertEqual(reply.ops, [])
+        self.assertEqual(o2.voyage.t, 0.0)
 
     def test_unknown_message_without_llm_returns_help(self):
         o = Ops()
@@ -359,7 +364,7 @@ class Test8Deployment(unittest.TestCase):
             at.run()
             self.assertEqual([e.value for e in at.exception], [])
             text = " ".join(m.value for m in at.markdown)
-            self.assertIn("Command mode", text)
+            self.assertIn("command mode", text.lower())
             self.assertIn("SIMULATED", text.upper())
             # drive the chat through the real UI callback path
             at.chat_input(key="chat_in").set_value("Advance the voyage by 2 days").run()

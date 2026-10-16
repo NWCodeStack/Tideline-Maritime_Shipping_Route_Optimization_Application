@@ -55,7 +55,57 @@ def _zone_rect(key: str, cls: str) -> str:
             f"<title>{html.escape(z.label)}</title></rect>")
 
 
-def build_map_html(G, routes: list[dict], settings: dict | None = None, height: int = 520) -> str:
+def build_ops_map_html(G, settings: dict, done_pts, ahead_pts, superseded=(), alternatives=(), blocked=(),
+                       ship=None, ship_status: str = "", route_color: str = "#58aaff", height: int = 500) -> str:
+    """Offline live-operations map (no tiles, no folium): network, scenario zones, completed / remaining /
+    superseded / alternative / blocked routes, storm cells, and the SIMULATED ship position."""
+    import math
+    s = normalise(settings)
+    over = []
+    for name, pts in alternatives:
+        if len(pts) > 1:
+            over.append(f'<path class="alt" d="{_poly_d(pts)}"><title>Alternative considered: {html.escape(name)}</title></path>')
+    for pts in superseded:
+        if len(pts) > 1:
+            over.append(f'<path class="sup" d="{_poly_d(pts)}"><title>Previous route (superseded)</title></path>')
+    if len(blocked) > 1:
+        over.append(f'<path class="blk" d="{_poly_d(blocked)}"><title>Planned route - BLOCKED</title></path>')
+    if len(ahead_pts) > 1:
+        over.append(f'<path class="route" stroke="{route_color}" d="{_poly_d(ahead_pts)}"><title>Remaining route</title></path>')
+    if len(done_pts) > 1:
+        over.append(f'<path class="done" d="{_poly_d(done_pts)}"><title>Completed track</title></path>')
+    for cell in s.get("storm_cells", []):
+        cx, cy = project(cell["lat"], cell["lon"])
+        r = cell["radius_nm"] / 60.0 * (WORLD_W / 360.0) / max(math.cos(math.radians(cell["lat"])), 0.2)
+        over.append(f'<circle class="zone storm" cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}"><title>Storm '
+                    f'{html.escape(cell.get("label", ""))} ({cell["wave_m"]:g} m) - simulated scenario</title></circle>')
+    for key in ("suez", "panama", "hormuz", "bab_el_mandeb"):
+        on = {"suez": s.get("suez_blockage"), "panama": s.get("panama_closure"), "hormuz": s.get("hormuz_blockade"),
+              "bab_el_mandeb": s.get("bab_el_mandeb_closure")}[key]
+        if on:
+            lat, lon = {"suez": (30.5, 32.4), "panama": (9.1, -79.7), "hormuz": (26.5, 56.5),
+                        "bab_el_mandeb": (12.6, 43.4)}[key]
+            x, y = project(lat, lon)
+            over.append(f'<g class="xmark"><circle cx="{x:.1f}" cy="{y:.1f}" r="9"/><path d="M{x - 5:.1f},{y - 5:.1f} '
+                        f'L{x + 5:.1f},{y + 5:.1f} M{x + 5:.1f},{y - 5:.1f} L{x - 5:.1f},{y + 5:.1f}"/>'
+                        f'<title>{key.replace("_", "-").title()} CLOSED (simulated scenario)</title></g>')
+    if ship is not None:
+        x, y = project(ship.lat, ship.lon)
+        fill = {"blocked": RED, "arrived": "#4de0c8"}.get(ship_status, "#ffffff")
+        over.append(f'<g transform="translate({x:.1f},{y:.1f}) rotate({ship.course_deg:.0f})"><path class="ship" fill="{fill}" '
+                    f'd="M0,-11 L7,9 L0,5 L-7,9 Z"/></g><text class="shiplabel" x="{x + 12:.1f}" y="{y - 10:.1f}">'
+                    f'SIMULATED POSITION</text>')
+    legend = ('<span><i style="background:#4de0c8"></i>completed</span>'
+              f'<span><i style="background:{route_color}"></i>remaining</span>'
+              '<span class="k"><b style="color:#829aac"></b>superseded</span>'
+              f'<span class="k"><b style="color:{AMBER}"></b>alternative</span>'
+              f'<span class="k"><b style="color:{RED}"></b>blocked / closed</span>'
+              f'<span class="k"><b style="color:{STORM}"></b>storm</span>')
+    return build_map_html(G, [], settings, height=height, overlay="".join(over), legend_html=legend)
+
+
+def build_map_html(G, routes: list[dict], settings: dict | None = None, height: int = 520, overlay: str = "",
+                   legend_html: str | None = None) -> str:
     """``routes`` items: {label, color, result (RouteResult), hold (RouteResult | None)}."""
     s = normalise(settings)
 
@@ -119,6 +169,10 @@ def build_map_html(G, routes: list[dict], settings: dict | None = None, height: 
 
     legend = "".join(
         f'<span><i style="background:{r["color"]}"></i>{html.escape(r["label"])}</span>' for r in routes)
+    legend_block = (f'<div class="legend">{legend_html}</div>' if legend_html is not None else
+                    f'<div class="legend">{legend}<span class="k"><b style="color:{AMBER}"></b>high war-risk</span>'
+                    f'<span class="k"><b style="color:{STORM}"></b>storm</span><span class="k"><b style="color:{RED}">'
+                    f'</b>closed</span><span class="k"><b style="color:#829aac"></b>previous route</span></div>')
     grid = "".join(
         f'<line x1="{project(0, lon)[0]:.1f}" y1="0" x2="{project(0, lon)[0]:.1f}" y2="{WORLD_H:.0f}"/>'
         for lon in range(-150, 181, 30)
@@ -146,6 +200,13 @@ svg{{width:100%;height:100%;display:block;cursor:grab;touch-action:none;user-sel
  font-size:11px;color:#a9c3d0;display:flex;gap:14px;flex-wrap:wrap;max-width:75%}}
 .legend i{{display:inline-block;width:18px;height:4px;margin-right:6px;vertical-align:middle;border-radius:2px}}
 .legend .k{{color:#829aac}}.legend .k b{{display:inline-block;width:14px;height:0;border-top:2px dashed;margin-right:5px;vertical-align:middle}}
+.done{{fill:none;stroke:#4de0c8;stroke-width:4.5;stroke-linecap:round;stroke-linejoin:round}}
+.sup{{fill:none;stroke:#829aac;stroke-width:2.5;stroke-dasharray:6 8;stroke-linecap:round}}
+.alt{{fill:none;stroke:{AMBER};stroke-width:2;stroke-dasharray:1 7;stroke-linecap:round;opacity:.7}}
+.blk{{fill:none;stroke:{RED};stroke-width:3;stroke-dasharray:4 6;stroke-linecap:round}}
+.xmark circle{{fill:#39232f;stroke:{RED};stroke-width:2}}.xmark path{{stroke:{RED};stroke-width:2.5}}
+.ship{{stroke:{SEA};stroke-width:1.5}}
+.shiplabel{{font:800 11px 'DM Sans',sans-serif;fill:#e8f3fa;letter-spacing:.08em;paint-order:stroke;stroke:{SEA};stroke-width:4}}
 .tools{{position:absolute;right:12px;top:12px;display:flex;gap:6px}}
 .tools button{{width:30px;height:30px;border:1px solid #335068;background:#132738;color:#a8c7d4;border-radius:8px;font-size:15px;cursor:pointer}}
 .tools button:hover{{color:#fff;background:#1a3348}}
@@ -154,10 +215,10 @@ svg{{width:100%;height:100%;display:block;cursor:grab;touch-action:none;user-sel
 <rect width="{WORLD_W:.0f}" height="{WORLD_H:.0f}" fill="{SEA}"/>
 <g class="grid">{grid}</g>{land_svg_markup()}
 <g>{''.join(lanes)}</g><g>{''.join(zones)}</g><g>{''.join(labels)}</g><g>{''.join(route_svg)}</g><g>{''.join(ports)}</g>
+<g>{overlay}</g>
 </svg>
 <div class="tools"><button id="zi" title="Zoom in">+</button><button id="zo" title="Zoom out">&minus;</button><button id="zr" title="Reset">&#x2922;</button></div>
-<div class="legend">{legend}<span class="k"><b style="color:{AMBER}"></b>high war-risk</span><span class="k"><b style="color:{STORM}"></b>storm</span>
-<span class="k"><b style="color:{RED}"></b>closed</span><span class="k"><b style="color:#829aac"></b>previous route</span></div></div>
+{legend_block}</div>
 <script>
 const svg=document.getElementById('m'),W={WORLD_W:.0f},H={WORLD_H:.0f};
 const state={json.dumps({"x": 0, "y": 0, "w": WORLD_W, "h": WORLD_H})};

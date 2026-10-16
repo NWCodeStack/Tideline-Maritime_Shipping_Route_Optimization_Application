@@ -107,7 +107,8 @@ def _network_layers(m, G, s: dict) -> None:
     if s.get("bab_el_mandeb_closure"):
         _zone(zones, "bab_el_mandeb", RED, "Bab-el-Mandeb: CLOSED (scenario)")
     for cell in s.get("storm_cells", []):
-        src = "Open-Meteo-based scenario" if cell.get("source") == "open-meteo" else "simulated scenario"
+        src = ("forecast-informed scenario (Open-Meteo)" if str(cell.get("source", "")).startswith("open-meteo")
+               else "simulated scenario")
         folium.Circle([cell["lat"], cell["lon"]], radius=cell["radius_nm"] * 1852, color=STORM, weight=1.5,
                       dash_array="6 5", fill=True, fill_color=STORM, fill_opacity=0.18,
                       tooltip=f"Storm {cell.get('label', '')}: {cell['wave_m']:g} m waves ({src})").add_to(zones)

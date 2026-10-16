@@ -187,6 +187,10 @@ def load_or_train_model(path: Path = MODEL_PATH) -> FuelModel:
             save_model(model, path)
         except OSError:                                   # read-only checkout: keep going in memory
             pass
+    try:                                                  # small per-lane batches: avoid joblib worker threads
+        model.pipeline.set_params(model__n_jobs=1)
+    except (ValueError, AttributeError):
+        pass
     return model
 
 

@@ -58,6 +58,10 @@ def load_pickled_model(path=MODEL_PATH) -> FuelModel | None:
         return None
     if not isinstance(model, FuelModel) or model.sklearn_version != sklearn.__version__:
         return None
+    try:                                     # tiny per-lane batches: one thread beats spinning up joblib workers
+        model.pipeline.set_params(model__n_jobs=1)
+    except (ValueError, AttributeError):
+        pass
     return model
 
 

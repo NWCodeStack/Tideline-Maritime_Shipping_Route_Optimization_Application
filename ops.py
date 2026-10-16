@@ -49,6 +49,11 @@ class Ops:
         self._last_tick: float | None = None
         self.chat: list[dict] = []
         self.version = 0                  # bumps whenever the route/itinerary changes (map redraw key)
+        self.demo: dict | None = None     # hackathon demo results (before/after snapshot)
+        self._demo_target: float | None = None   # animated demo: voyage hour at which the closure triggers
+        self._demo_source = "demo"
+        self.last_change: dict | None = None  # {cause, before, after} of the latest re-evaluation that moved the route
+        self._pre_demo: tuple | None = None   # (cfg, settings, voyage, playing) to restore on exit
 
     # ---------------------------------------------------------------- helpers
     @property
@@ -63,6 +68,15 @@ class Ops:
 
     def _touch(self) -> None:
         self.version += 1
+
+    def _reevaluate(self, cause: str, source: str = "manual", **kw) -> str:
+        """V.reevaluate plus a before/after snapshot whenever the remaining route or voyage status changes."""
+        before = self.snapshot() if self.voyage.legs else None
+        sig, status = V.route_signature(self.voyage), self.voyage.status
+        msg = V.reevaluate(self.voyage, self.settings, self.model, cause=cause, source=source, **kw)
+        if before is not None and (V.route_signature(self.voyage) != sig or self.voyage.status != status):
+            self.last_change = {"cause": cause, "before": before, "after": self.snapshot(), "message": msg}
+        return msg
 
     def port_name(self, pid: str) -> str:
         return PORTS.get(pid, pid)
@@ -84,6 +98,7 @@ class Ops:
         if self.cfg.owner_key not in V.VESSEL_OWNERS[self.cfg.vessel_key]:
             self.cfg = replace(self.cfg, owner_key=V.VESSEL_OWNERS[self.cfg.vessel_key][0])
         self.voyage = V.plan_voyage(self.cfg, self.settings, self.model)
+        self.demo = self.last_change = self._demo_target = None
         if source != "manual":
             self.voyage.timeline[-1]["source"] = source
         self.playing = False
@@ -113,7 +128,7 @@ class Ops:
             self._touch()
             return f"Assumptions updated ({what}); voyage re-planned. " + self.voyage.timeline[-1]["detail"]
         self.voyage.config = self.cfg
-        msg = V.reevaluate(self.voyage, self.settings, self.model, cause=f"Assumption change: {what}",
+        msg = self._reevaluate(cause=f"Assumption change: {what}",
                            prev_config=prev, source=source)
         self._touch()
         return msg
@@ -145,6 +160,7 @@ class Ops:
         return self.start()
 
     def reset(self) -> str:
+        self.demo = self.last_change = self._demo_target = None  # before/after panels no longer describe this voyage
         self.voyage = V.plan_voyage(self.cfg, self.settings, self.model)
         self.playing = False
         self._last_tick = None
@@ -164,7 +180,13 @@ class Ops:
             return False
         dt = min(max(now - self._last_tick, 0.0), 3.0)        # cap catch-up after a stall
         self._last_tick = now
-        arrived = V.advance(self.voyage, dt * self.speed)
+        step = dt * self.speed
+        if self._demo_target is not None:                    # animated demo: stop exactly at the approach point
+            step = min(step, max(self._demo_target - self.voyage.t, 0.0))
+        arrived = V.advance(self.voyage, step)
+        if self._demo_target is not None and self.voyage.t >= self._demo_target - 1e-9:
+            self._demo_trigger(self._demo_source)
+            return False
         if arrived or self.voyage.status in ("arrived", "blocked"):
             self.playing = False
         return arrived
@@ -177,6 +199,9 @@ class Ops:
             return "Ship has already arrived."
         if v.status == "planned":
             V.log(v, "departure", f"Departed {self.port_name(self.cfg.origin)}", "Simulated clock advanced.", source)
+        if self._demo_target is not None and v.t + hours >= self._demo_target:
+            V.advance(v, self._demo_target - v.t)
+            return self._demo_trigger(self._demo_source)
         V.advance(v, float(hours))
         s = self.state()
         return (f"Advanced {hours / 24:.1f} days → voyage day {v.t / 24:.1f}. Ship at ({s.lat:.2f}, {s.lon:.2f}), "
@@ -184,6 +209,7 @@ class Ops:
                 + (" - ARRIVED." if v.status == "arrived" else "."))
 
     def seek(self, t_hours: float) -> str:
+        self._demo_target = None             # manual scrubbing cancels a pending animated-demo trigger
         V.seek(self.voyage, t_hours)
         return f"Moved to voyage hour {self.voyage.t:,.1f}."
 
@@ -209,7 +235,7 @@ class Ops:
         self.settings = copy.deepcopy(self.settings)
         self.settings[key] = value
         try:
-            msg = V.reevaluate(self.voyage, self.settings, self.model, cause=cause, force=force, source=source)
+            msg = self._reevaluate(cause=cause, force=force, source=source)
         except Exception:
             self.settings, self.voyage = prev_settings, prev_voyage
             raise
@@ -264,7 +290,7 @@ class Ops:
         prev_settings, prev_voyage = self.settings, copy.deepcopy(self.voyage)
         self.settings = default_settings() | copy.deepcopy(new)
         try:
-            msg = V.reevaluate(self.voyage, self.settings, self.model, cause=f"SCENARIO (simulated): {label}",
+            msg = self._reevaluate(cause=f"SCENARIO (simulated): {label}",
                                source=source)
         except Exception:
             self.settings, self.voyage = prev_settings, prev_voyage
@@ -278,7 +304,7 @@ class Ops:
             return "No active scenarios."
         old = self.settings
         self.settings = fresh
-        msg = V.reevaluate(self.voyage, self.settings, self.model, cause="All scenarios cleared", source=source)
+        msg = self._reevaluate(cause="All scenarios cleared", source=source)
         self._touch()
         return f"Cleared scenarios ({', '.join(describe(old))}). {msg}"
 
@@ -305,7 +331,7 @@ class Ops:
             self.cfg = replace(self.cfg, preference=preference)
             self.voyage.config = self.cfg
         node = VIA_NODES.get(via, via) if via else None
-        msg = V.reevaluate(self.voyage, self.settings, self.model,
+        msg = self._reevaluate(
                            cause=f"Reroute requested ({V.PREFERENCES[self.cfg.preference]}"
                                  + (f" via {self.G.nodes[node]['name']}" if node else "") + ")",
                            force=True, via=node, source=source)
@@ -352,6 +378,145 @@ class Ops:
                 f"{dd:+.1f} days ({alt.hours / 24:.1f} vs {cur.hours / 24:.1f}), {alt.nm - cur.nm:+,.0f} nm, "
                 f"fuel {alt.fuel_t - cur.fuel_t:+,.0f} t, tolls ${(alt.toll_usd - cur.toll_usd) / 1e3:+,.0f}k, "
                 f"risk {dr:+.0f} points. Modelled estimates on a synthetic network.")
+
+    # ---------------------------------------------------------------- forecast-informed simulation (opt-in)
+    FORECAST_SOURCE = "open-meteo-forecast"
+    MAX_FORECAST_CELLS = 6
+
+    def apply_forecast_hazards(self, assessment: dict, wave_threshold_m: float = 4.0,
+                               radius_nm: float = 250.0) -> str | None:
+        """Turn forecast hazards AHEAD of the ship (Open-Meteo waves >= threshold at the simulated ETA) into
+        clearly labelled simulated storm cells and re-assess the remaining route from the ship's position.
+        Cells accumulate (deduplicated, capped) so the router cannot oscillate between routes. Returns None
+        when there is nothing new to apply."""
+        if not assessment or assessment.get("status") == "unavailable" or assessment.get("stale"):
+            return None
+        hazards = [p for p in assessment.get("points", [])[1:]            # [0] is the ship itself: hazards AHEAD
+                   if p["status"] == "forecast" and (p["values"].get("wave_height") or 0) >= wave_threshold_m]
+        current = list(self.settings["storm_cells"])
+        mine = [c for c in current if c.get("source") == self.FORECAST_SOURCE]
+        seen = {(round(c["lat"], 1), round(c["lon"], 1)) for c in mine}
+        new = []
+        for p in hazards:
+            k = (round(p["lat"], 1), round(p["lon"], 1))
+            if k in seen or len(mine) + len(new) >= self.MAX_FORECAST_CELLS:
+                continue
+            seen.add(k)
+            new.append({"lat": p["lat"], "lon": p["lon"], "radius_nm": radius_nm,
+                        "wave_m": float(p["values"]["wave_height"]),
+                        "label": f"forecast hazard {p['label'].lower()} (Open-Meteo, ETA {p['eta']:%b %d %H:%M} UTC)",
+                        "source": self.FORECAST_SOURCE, "fetched_at": assessment.get("fetched_at")})
+        if not new:
+            return None
+        return self.set_event(
+            "storm_cells", current + new, source="forecast",
+            label=f"FORECAST-INFORMED SCENARIO: {len(new)} Open-Meteo hazard(s) with waves >= {wave_threshold_m:g} m "
+                  f"converted to simulated storm cells (forecast fetched {assessment.get('fetched_at')} UTC)")
+
+    def clear_forecast_hazards(self) -> str:
+        keep = [c for c in self.settings["storm_cells"] if c.get("source") != self.FORECAST_SOURCE]
+        if len(keep) == len(self.settings["storm_cells"]):
+            return "No forecast-informed storm cells to clear."
+        return self.set_event("storm_cells", keep, label="forecast-informed storm cells removed")
+
+    # ---------------------------------------------------------------- counterfactual previews
+    def clone(self) -> "Ops":
+        """An isolated copy for what-if analysis: same read-only model, deep-copied voyage/scenario state.
+        Nothing done to the clone can reach this session's state."""
+        c = object.__new__(Ops)
+        c.__dict__.update(self.__dict__)
+        c.settings = copy.deepcopy(self.settings)
+        c.voyage = copy.deepcopy(self.voyage)
+        c.chat, c.demo, c._pre_demo, c.playing, c._last_tick = [], None, None, False, None
+        c.last_change = c._demo_target = None
+        return c
+
+    # ---------------------------------------------------------------- hackathon demo mode
+    DEMO_APPROACH_FRACTION = 0.5          # halfway along the East Mediterranean -> Port Said lane
+
+    def snapshot(self) -> dict:
+        """Whole-voyage figures right now (ETA, distance, cost, risk) for before/after comparisons."""
+        G = self.G
+        p = V.projected(self.voyage, G)
+        s = self.state()
+        return {"t": self.voyage.t, "lat": s.lat, "lon": s.lon, "eta": p["eta"], "total_h": self.voyage.total_hours,
+                "nm": p["nm"], "remaining_nm": s.remaining_nm, "total_usd": p["total_usd"],
+                "remaining_usd": p["remaining_usd"], "fuel_t": p["fuel_t"], "toll_usd": p["toll_usd"],
+                "risk": p["remaining_risk_index"], "corridor": self.route_corridor(), "status": self.voyage.status}
+
+    DEMO_PLAYBACK_H_PER_S = 50.0          # animated demo: ~3 s time-lapse from Rotterdam to the Port Said approach
+
+    def run_demo(self, source: str = "demo", animate: bool = False) -> str:
+        """One-click scenario: Rotterdam -> Shanghai container ship, sailed to the Port Said approach, then a
+        SIMULATED Suez closure re-routes it around the Cape of Good Hope from where it is. Replayable: calling it
+        again restarts from scratch; ``exit_demo`` restores whatever the user had before the first run.
+
+        ``animate=False`` jumps the simulated clock straight to the approach (labelled as a time jump).
+        ``animate=True`` plays the voyage as a time-lapse and ``tick`` triggers the closure on arrival there."""
+        if self._pre_demo is None:
+            self._pre_demo = (self.cfg, copy.deepcopy(self.settings), copy.deepcopy(self.voyage), self.playing)
+        self.cfg = replace(V.VoyageConfig(), origin="RTM", destination="SHA", vessel_key="container",
+                           owner_key="high_margin", preference="balanced", departure=self.cfg.departure)
+        self.settings = default_settings()
+        self.voyage = V.plan_voyage(self.cfg, self.settings, self.model)
+        self.playing = False
+        self._last_tick = None
+        v, G = self.voyage, self.G
+        V.log(v, "demo", "Hackathon demo started (SIMULATED scenario)",
+              "Rotterdam → Shanghai container ship; a simulated Suez Canal closure will be triggered before the canal.",
+              source)
+        # Sail to a point on the lane that approaches Port Said from the Mediterranean (open water, before the canal).
+        acc, t_target = 0.0, None
+        for l in v.legs:
+            if l.kind == "sail" and l.y == "PSD" and l.f0 == 0.0:
+                t_target = acc + l.wait_h + l.sea_h * self.DEMO_APPROACH_FRACTION
+                break
+            acc += l.hours
+        if t_target is None:
+            raise RuntimeError("Demo needs the planned route to approach Suez from the Mediterranean.")
+        self.demo = None
+        v.status = "underway"
+        if animate:
+            V.log(v, "departure", "Departed Rotterdam",
+                  f"Demo time-lapse: {self.DEMO_PLAYBACK_H_PER_S:g} simulated hours per second to the Port Said "
+                  "approach; the simulated Suez closure triggers automatically there.", source)
+            self._demo_target, self._demo_source = t_target, source
+            self.speed = self.DEMO_PLAYBACK_H_PER_S
+            self.playing = True
+            self._touch()
+            return (f"HACKATHON DEMO (simulated): sailing Rotterdam → Port Said approach as a time-lapse "
+                    f"(~{t_target / 24:.1f} simulated days); the Suez closure scenario will trigger there.")
+        V.log(v, "departure", "Departed Rotterdam",
+              f"Simulated TIME JUMP of {t_target / 24:.1f} days to the Port Said approach.", source)
+        V.advance(v, t_target)
+        return self._demo_trigger(source)
+
+    def _demo_trigger(self, source: str = "demo") -> str:
+        G = self.G
+        self._demo_target = None
+        self.playing = False
+        self._last_tick = None
+        before = self.snapshot()
+        msg = self.set_disruption("suez_closure", True, source=source)
+        after = self.snapshot()
+        _, ahead, _ = V.split_at(self.voyage, G)
+        via_cape = any(l.y == "CAPE" or l.x == "CAPE" for l in ahead if l.kind == "sail")
+        self.demo = {"before": before, "after": after, "message": msg, "via_cape": via_cape,
+                     "position": G.nodes["MED1"]["name"] + " → Port Said approach",
+                     "cause": "SIMULATED Suez Canal closure while approaching Port Said (hackathon demo)"}
+        self._touch()
+        return (f"HACKATHON DEMO (simulated): ship at {before['lat']:.2f}, {before['lon']:.2f} approaching Port Said "
+                f"on day {before['t'] / 24:.1f}. {msg}")
+
+    def exit_demo(self) -> str:
+        if self._pre_demo is None:
+            return "Demo mode is not active."
+        self.cfg, self.settings, self.voyage, _ = self._pre_demo
+        self._pre_demo, self.demo, self.last_change, self._demo_target = None, None, None, None
+        self.playing = False
+        self._last_tick = None
+        self._touch()
+        return "Demo mode exited; your previous voyage, assumptions and scenarios were restored."
 
     # ---------------------------------------------------------------- explanations (read-only)
     def explain(self, topic: str = "status") -> str:

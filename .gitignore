@@ -21,3 +21,10 @@ models/
 .DS_Store
 Thumbs.db
 .claude/
+
+# Review / release bundles
+dist/
+
+# Generated artefacts
+*.pkl
+*.log

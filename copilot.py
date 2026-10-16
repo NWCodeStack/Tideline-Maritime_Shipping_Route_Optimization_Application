@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from events import EVENT_BY_KEY
 from ops import DISRUPTIONS, PORTS, VIA_NODES, Ops
 from voyage import PREFERENCES, VESSELS
 
@@ -42,8 +43,86 @@ SCHEMA: dict[str, dict] = {
     "explain": {"topic": (str, True, ("status", "eta", "cost", "risk", "options"))},
     "weather": {},
     "news": {"region": (str, False, None)},
+    "run_demo": {}, "exit_demo": {},
+    "scenario_status": {"name": (str, True, tuple(DISRUPTIONS))},
 }
-READ_ONLY = {"explain", "weather", "news", "compare_route"}
+READ_ONLY = {"explain", "weather", "news", "compare_route", "scenario_status", "preview"}
+# Operations a hypothetical can be previewed for (on an isolated copy of the session).
+PREVIEWABLE = {"set_disruption", "add_storm", "clear_storms", "clear_disruptions", "set_congestion", "reroute",
+               "set_preference", "set_fuel_price", "set_speed"}
+
+# ------------------------------------------------------------------------------------------------
+# Intent: is the user TELLING us to change the simulation, ASKING about it, or exploring a WHAT-IF?
+# Only "action" messages may change state. Everything else is answered read-only or as a preview.
+# ------------------------------------------------------------------------------------------------
+NEGATION_RE = re.compile(
+    r"\b(do not|don't|dont|never|without (?:changing|modifying|applying|touching|actually)|no changes?|"
+    r"just (?:explain|tell|show|describe|estimate)|only (?:explain|show|tell|describe|estimate)|"
+    r"hypothetical(?:ly)?|leave (?:it|everything|the (?:ship|voyage)) (?:as is|alone))\b")
+HYPOTHETICAL_RE = re.compile(
+    r"\b(what if|what happens|what would|what'd|would (?:it|that|this|we|our|my|the|a)|suppose|supposing|imagine|"
+    r"in case|preview|counterfactual|if (?:the |a |our )?[\w-]+(?: [\w-]+)?(?: canal| strait)? "
+    r"(?:closes|closed|were|was|shuts|increases?|rises?|goes up|jumps|doubles|drops|falls))\b")
+IMPERATIVE_RE = re.compile(
+    r"^\s*(?:ok(?:ay)?[, ]+|now[, ]+|please[, ]+|go ahead and |can you |could you |pls )*"
+    r"(simulate|close|shut|block|trigger|apply|activate|enable|set|reroute|re-route|divert|advance|fast[- ]?forward|"
+    r"skip|start|begin|pause|stop|freeze|resume|continue|unpause|reset|restart|increase|raise|decrease|lower|cut|"
+    r"reduce|switch|use|take|change|place|add|put|create|plan|open|reopen|lift|clear|remove|cancel|run|replay|"
+    r"exit|avoid|find|go|move|jump|make|launch|sail|turn|depart|optimi[sz]e|recalculate|replan|end|quit|leave)\b")
+QUESTION_RE = re.compile(
+    r"^\s*(is|are|was|were|does|do|did|has|have|can|could|will|should|what|which|how|why|when|where|who|show|tell|"
+    r"list|give me|any|explain|describe|summari[sz]e|compare)\b")
+IMPACT_RE = re.compile(r"\b(impact|affect|effect|happen|mean for|consequence|cost us|delay us|would)\b")
+
+
+def classify(message: str) -> str:
+    """'negated' | 'hypothetical' | 'action' | 'question' | 'statement' (ambiguous: no verb telling us to act)."""
+    t = message.lower().replace("’", "'").strip()
+    if NEGATION_RE.search(t):
+        return "negated"
+    if HYPOTHETICAL_RE.search(t):
+        return "hypothetical"
+    parts = [p.strip() for p in re.split(r"(?<=[.!?;])\s+|\n+|,?\s+(?:and|then)\s+(?=\w)", t) if p.strip()]
+    if any(IMPERATIVE_RE.match(p) and not p.endswith("?") for p in parts):
+        return "action"
+    if any(p.endswith("?") or QUESTION_RE.match(p) for p in parts):
+        return "question"
+    return "statement"
+
+
+def gate(ops_list: list["Op"], intent: str, message: str) -> tuple[list["Op"], list[str]]:
+    """Apply the intent rules to validated operations. Returns (operations to run, notes for the reply).
+    The same rules apply to parser output and to LLM proposals."""
+    if intent == "action":
+        return ops_list, []
+    t = message.lower()
+    out, notes, held = [], [], []
+    has_news = any(o.name == "news" for o in ops_list)
+    for op in ops_list:
+        if op.name in READ_ONLY:
+            out.append(op)
+        elif intent in ("negated", "hypothetical") and op.name in PREVIEWABLE:
+            out.append(Op("preview", {"op": op.name, "args": op.args}))
+        elif intent == "question" and op.name == "set_disruption" and not has_news:
+            if IMPACT_RE.search(t):
+                out.append(Op("preview", {"op": op.name, "args": op.args}))
+            else:
+                out.append(Op("scenario_status", {"name": op.args["name"]}))
+        elif intent == "question" and op.name in PREVIEWABLE and not has_news and IMPACT_RE.search(t):
+            out.append(Op("preview", {"op": op.name, "args": op.args}))
+        else:
+            held.append(op)
+    if held and not has_news:              # "show news about a closure" is simply a news request
+        what = ", ".join(sorted({o.name for o in held}))
+        if intent == "statement":
+            notes.append(f"I didn't change anything: your message reads like a statement, not an instruction ({what}). "
+                         "Say e.g. 'Simulate a Suez closure and reroute' to apply it, or 'What if Suez closes?' "
+                         "for a preview that leaves the voyage untouched.")
+        else:
+            notes.append(f"Nothing was changed ({what} not applied: your message was a "
+                         f"{'question' if intent == 'question' else intent + ' request'}). "
+                         "Give an explicit instruction (e.g. 'Simulate…', 'Close…', 'Advance…') to apply it.")
+    return out, notes
 
 
 @dataclass
@@ -139,6 +218,13 @@ def parse(text: str, ops: Ops) -> list[Op]:
     t = " " + text.lower().replace("’", "'") + " "
     out: list[Op] = []
     cfg = ops.cfg
+
+    # --- hackathon demo (handled alone: it sets up its own voyage and scenario)
+    if re.search(r"\bdemo\b", t):
+        if re.search(r"\b(exit|stop|end|leave|quit|close)\b", t):
+            return [Op("exit_demo")]
+        if re.search(r"\b(run|start|play|replay|launch|begin|show|do)\b", t):
+            return [Op("run_demo")]
 
     # --- voyage creation
     ports = _ports_in(t)
@@ -326,6 +412,18 @@ def execute(op: Op, ops: Ops, intel: dict | None = None) -> str:
         return ops.compare_via(a["via"])
     if op.name == "explain":
         return ops.explain(a["topic"])
+    if op.name == "preview":
+        return preview(Op(a["op"], dict(a["args"])), ops, intel)
+    if op.name == "scenario_status":
+        key, _, label = DISRUPTIONS[a["name"]]
+        state = "ACTIVE" if ops.settings[key] != EVENT_BY_KEY[key].default else "not active"
+        return (f"In this simulation the '{label}' scenario is {state}. Tideline does not verify real-world "
+                "closures; recent headlines are in the News & Security tab and are advisory only. "
+                f"Ask 'What if …?' to preview the impact, or 'Simulate …' to apply it.")
+    if op.name == "run_demo":
+        return ops.run_demo(source=src)
+    if op.name == "exit_demo":
+        return ops.exit_demo()
     if op.name == "weather":
         return (intel or {}).get("weather_summary") or "Live weather is unavailable right now (see the Weather tab)."
     if op.name == "news":
@@ -350,8 +448,33 @@ class Reply:
     changed: bool = False
 
 
+def preview(op: Op, ops: Ops, intel: dict | None = None) -> str:
+    """Run ONE operation on an isolated copy of the session and report the difference. The live session is not
+    touched (no scenario, timeline, route or clock change)."""
+    sandbox = ops.clone()
+    before = sandbox.snapshot()
+    result = execute(op, sandbox, intel)
+    after = sandbox.snapshot()
+    d_days = (after["eta"] - before["eta"]).total_seconds() / 86400
+    if before["corridor"] == after["corridor"] and abs(d_days) < 0.05 and abs(after["total_usd"] - before["total_usd"]) < 1000:
+        effect = "no material change to the remaining route, ETA or cost"
+    else:
+        dc = (after["total_usd"] - before["total_usd"]) / 1e6
+        effect = (f"route {before['corridor']} → {after['corridor']}, ETA {d_days:+.1f} days, "
+                  f"distance {after['nm'] - before['nm']:+,.0f} nm, all-in cost "
+                  f"{'+' if dc >= 0 else '-'}${abs(dc):,.2f}M, risk ahead "
+                  f"{before['risk']:.0f} → {after['risk']:.0f}")
+    if after["status"] == "blocked" and before["status"] != "blocked":
+        effect = "the voyage would be BLOCKED (no feasible sea passage from the ship's position)"
+    detail = (result.replace("SCENARIO (simulated): ", "what-if: ").replace("REROUTED", "the ship would reroute")
+              .replace("Remaining route NOT affected", "the remaining route would NOT be affected"))
+    return (f"PREVIEW ONLY - nothing was changed. If applied: {effect}. "
+            f"(Simulated what-if on a copy of your voyage; modelled estimates.) Engine detail for the copy: {detail}")
+
+
 def handle(message: str, ops: Ops, llm=None, intel: dict | None = None) -> Reply:
     """Full pipeline for one chat message."""
+    intent = classify(message)
     proposed = parse(message, ops)
     mode = "command"
     llm_reply = ""
@@ -368,6 +491,7 @@ def handle(message: str, ops: Ops, llm=None, intel: dict | None = None) -> Reply
             valid.append(validate(op))
         except InvalidOp as e:
             rejected.append((op, str(e)))
+    valid, notes = gate(valid, intent, message)   # same intent rules for parser and LLM proposals
     results = []
     for op in valid:
         try:
@@ -376,11 +500,11 @@ def handle(message: str, ops: Ops, llm=None, intel: dict | None = None) -> Reply
             results.append((op.name, op.args, f"Operation failed: {e}"))
     changed = any(name not in READ_ONLY for name, *_ in results)
     if not results:
-        text = llm_reply or HELP
+        text = " ".join(notes) or llm_reply or HELP
         if rejected:
             text += " (Rejected: " + "; ".join(r for _, r in rejected) + ")"
         return Reply(text, [], rejected, mode, False)
-    text = "\n\n".join(r for *_, r in results)
+    text = "\n\n".join([r for *_, r in results] + notes)
     if llm is not None and any(name in READ_ONLY for name, *_ in results):
         prose = llm.explain(message, text)
         if prose:

@@ -7,7 +7,7 @@ app.py - Tideline: live AI shipping-operations simulator (Streamlit) + the origi
 Live operations tab
     Plan a voyage, start the simulated clock and watch the ship move along the modelled lanes. Toggle disruptions
     in the incident panel (or ask the copilot) and the remaining voyage is re-routed from the ship's current
-    position. Weather (Open-Meteo) and maritime headlines (GDELT / Google News RSS) feed the sidebar.
+    position. Weather (Open-Meteo) and maritime headlines (GDELT / Google News RSS) feed the Alerts & Intelligence panel.
 Multi-agent stress test tab
     The original comparison: a container ship and an oil tanker re-routing under the same shocks.
 
@@ -68,22 +68,26 @@ def _in_streamlit() -> bool:
 
 
 def render_ui() -> None:
-    """The Streamlit dashboard (imports streamlit lazily so `python app.py` works without it)."""
+    """The Streamlit dashboard (imports streamlit lazily so `python app.py` works without it).
+
+    Page hierarchy: header (status) -> [Voyage & Simulation | Alerts & Intelligence] -> Route KPIs ->
+    [Live route map | Operations copilot] -> Rerouting decision & event timeline. Advanced configuration
+    lives in the (collapsed) sidebar."""
     import html
     import json
-    import time
     from datetime import datetime, timezone
 
     import numpy as np
     import streamlit as st
     import streamlit.components.v1 as components
 
-    try:                                    # interactive Leaflet map; falls back to simpler maps without it
+    try:                                    # interactive Leaflet map; the offline SVG map is used without it
         from streamlit_folium import st_folium
         from folium_map import build_folium_map, build_ops_base_map, build_ops_layer
         HAS_FOLIUM = True
     except ImportError:
         HAS_FOLIUM = False
+        st_folium = build_folium_map = build_ops_base_map = build_ops_layer = None
 
     import copilot
     import intel
@@ -93,16 +97,17 @@ def render_ui() -> None:
     from data_engine import CHOKEPOINTS, edges_dataframe, hub_ports
     from events import EVENT_BY_KEY, EVENT_CATALOG, HURRICANE_TRACKS, PRESETS
     from llm import get_provider
-    from map_view import build_map_html
+    from map_view import build_map_html, build_ops_map_html
     from ml_models import HULL
-    from ops import PORTS, SPEEDS, Ops
+    from ops import SPEEDS, Ops
 
-    st.set_page_config(page_title="Tideline · Maritime Operations", page_icon="⚓", layout="wide")
+    st.set_page_config(page_title="Tideline · Maritime Operations", page_icon="⚓", layout="wide",
+                       initial_sidebar_state="collapsed")
     st.markdown(f"<style>{ui.CSS}</style>", unsafe_allow_html=True)
     ss = st.session_state
 
     # ----------------------------------------------------------------------------------------------
-    # Cached, read-only resources
+    # Cached, read-only resources (shared across sessions; never mutated)
     # ----------------------------------------------------------------------------------------------
     @st.cache_resource(show_spinner="Training fuel model on 5,000 synthetic voyages...")
     def get_model():
@@ -136,14 +141,15 @@ def render_ui() -> None:
 
     model, G0 = get_model(), get_base_graph()
     llm, llm_status = get_llm()
+    llm_label = llm_status if llm else "Rules-based command mode (no LLM key)"
     if "ops" not in ss:
         ss["ops"] = Ops(model)
     ops: Ops = ss["ops"]
     ops.model = model
 
     # ----------------------------------------------------------------------------------------------
-    # Widget <-> controller sync. Widgets have keys; their state is rewritten from the controller on every run
-    # (before they are created), so a change made by the copilot shows up in the sidebar immediately.
+    # Widget <-> controller sync: widget state is rewritten from the controller on every run (before the widgets
+    # are created), so a change made by the copilot or the demo shows up in the controls immediately.
     # ----------------------------------------------------------------------------------------------
     def sync_widgets() -> None:
         c = ops.cfg
@@ -203,9 +209,12 @@ def render_ui() -> None:
     def on_seek() -> None:
         ops.seek(float(ss["seek_h"]))
 
+    def current_weather():
+        return intel.current_for(ss.get("weather"), V.route_signature(ops.voyage))
+
     def intel_ctx() -> dict:
         route = ops_route_chokepoints()
-        return {"weather_summary": intel.weather_summary(ss.get("weather")),
+        return {"weather_summary": intel.weather_summary(current_weather()),
                 "news_summary": lambda region: intel.news_summary(ss.get("news"), route, region)}
 
     def on_chat(prompt: str | None = None) -> None:
@@ -229,114 +238,83 @@ def render_ui() -> None:
 
     sync_widgets()
     for msg in ss.pop("_flash", []):
-        st.toast(msg[:300])
+        st.toast(md(msg[:300]))
 
     started = ops.started()
     ports = hub_ports(G0)
     port_ids = list(ports)
+    v = ops.voyage
 
     # ----------------------------------------------------------------------------------------------
-    # Sidebar: voyage, vessel, optimisation, simulation, incidents, alerts, live intelligence
+    # Sidebar: ADVANCED configuration only (collapsed by default). Everything needed for a demo is on the page.
     # ----------------------------------------------------------------------------------------------
     with st.sidebar:
-        st.markdown('<div class="section-name">Voyage</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        c1.selectbox("Departure port", port_ids, key="cfg_origin", format_func=lambda p: ports[p],
-                     on_change=on_voyage, disabled=started)
-        c2.selectbox("Destination", port_ids, key="cfg_dest", format_func=lambda p: ports[p],
-                     on_change=on_voyage, disabled=started)
-        st.selectbox("Vessel type", list(VESSELS), key="cfg_vessel", format_func=lambda k: VESSELS[k].label,
-                     on_change=on_voyage, disabled=started,
-                     help="Bulk carriers use the tanker hull class and LNG carriers the container hull class for "
-                          "fuel estimates (the fuel model was trained on those two classes).")
-        st.selectbox("Cargo owner", list(V.VESSEL_OWNERS[ops.cfg.vessel_key]), key="cfg_owner",
-                     format_func=lambda k: f"{CARGO_OWNERS[k].label} · {CARGO_OWNERS[k].cargo}",
-                     on_change=on_voyage, disabled=started)
-        d1, d2 = st.columns(2)
-        d1.date_input("Departure (UTC)", key="cfg_dep_date", on_change=on_cfg, args=("departure",), disabled=started)
-        d2.time_input("Time", key="cfg_dep_time", on_change=on_cfg, args=("departure",), disabled=started, step=3600)
-        if started:
-            st.caption("Voyage underway: route endpoints, vessel and departure are locked. Reset to change them.")
-
-        st.markdown('<div class="section-name" style="margin-top:18px">Vessel & economics</div>', unsafe_allow_html=True)
-        lo, hi = HULL[VESSELS[ops.cfg.vessel_key].vessel_type]["speed"]
-        st.toggle("Fixed cruising speed", key="cfg_fixed_speed", on_change=on_cfg, args=("cruise_speed_kn",),
-                  help="Off: the optimiser picks the cheapest of the vessel's speed options on every lane.")
-        st.slider("Cruising speed (kn)", float(lo), float(hi), step=0.5, key="cfg_speed", on_change=on_cfg,
-                  args=("cruise_speed_kn",), disabled=not ops.cfg.cruise_speed_kn)
-        st.slider("Fuel price ($/t VLSFO)", 300.0, 1600.0, step=10.0, key="cfg_fuel", on_change=on_cfg,
-                  args=("fuel_price",))
-        agent = ops.cfg.agent()
-        spd = agent.speed_options_kn[len(agent.speed_options_kn) // 2]
-        from routing_engine import predict_tonnes_per_day
-        tpd = float(predict_tonnes_per_day(model, agent.vessel_type, spd, agent.draft_m, agent.cargo_weight_t, 15.0, 1.5)[0])
-        st.caption(f"Estimated consumption at {spd:g} kn, calm sea: **{tpd:,.0f} t/day** "
-                   f"(≈ ${tpd * ops.cfg.fuel_price / 1e3:,.0f}k/day). Model estimate.")
-
-        st.markdown('<div class="section-name" style="margin-top:18px">Route optimisation</div>', unsafe_allow_html=True)
-        st.radio("Objective", list(V.PREFERENCES), key="cfg_pref", horizontal=True, format_func=V.PREFERENCES.get,
-                 on_change=on_cfg, args=("preference",), help=" · ".join(f"{V.PREFERENCES[k]}: {v}"
-                                                                          for k, v in V.PREFERENCE_HELP.items()))
-        if ops.cfg.preference == "balanced":
-            with st.expander("Balanced weights (time · cost · risk)"):
+        st.markdown('<div class="panel-title">Advanced settings</div><div class="panel-sub">Vessel economics, '
+                    'optimisation, delays and extra scenarios. Changes re-plan from the ship\'s position.</div>',
+                    unsafe_allow_html=True)
+        with st.expander("Voyage details", expanded=False):
+            st.selectbox("Cargo owner", list(V.VESSEL_OWNERS[ops.cfg.vessel_key]), key="cfg_owner",
+                         format_func=lambda k: f"{CARGO_OWNERS[k].label} · {CARGO_OWNERS[k].cargo}",
+                         on_change=on_voyage, disabled=started)
+            d1, d2 = st.columns(2)
+            d1.date_input("Departure (UTC)", key="cfg_dep_date", on_change=on_cfg, args=("departure",),
+                          disabled=started)
+            d2.time_input("Time", key="cfg_dep_time", on_change=on_cfg, args=("departure",), disabled=started,
+                          step=3600)
+        with st.expander("Vessel & fuel economics", expanded=False):
+            lo, hi = HULL[VESSELS[ops.cfg.vessel_key].vessel_type]["speed"]
+            st.toggle("Fixed cruising speed", key="cfg_fixed_speed", on_change=on_cfg, args=("cruise_speed_kn",),
+                      help="Off: the optimiser picks the cheapest of the vessel's speed options on every lane.")
+            st.slider("Cruising speed (kn)", float(lo), float(hi), step=0.5, key="cfg_speed", on_change=on_cfg,
+                      args=("cruise_speed_kn",), disabled=not ops.cfg.cruise_speed_kn)
+            st.slider("Fuel price ($/t VLSFO)", 300.0, 1600.0, step=10.0, key="cfg_fuel", on_change=on_cfg,
+                      args=("fuel_price",))
+            agent = ops.cfg.agent()
+            spd = agent.speed_options_kn[len(agent.speed_options_kn) // 2]
+            from routing_engine import predict_tonnes_per_day
+            tpd = float(predict_tonnes_per_day(model, agent.vessel_type, spd, agent.draft_m, agent.cargo_weight_t,
+                                               15.0, 1.5)[0])
+            st.caption(md(f"Model estimate at {spd:g} kn, calm sea: **{tpd:,.0f} t/day** "
+                          f"(≈ ${tpd * ops.cfg.fuel_price / 1e3:,.0f}k/day)."))
+        with st.expander("Route optimisation", expanded=False):
+            st.radio("Objective", list(V.PREFERENCES), key="cfg_pref", horizontal=True,
+                     format_func=V.PREFERENCES.get, on_change=on_cfg, args=("preference",),
+                     help=" · ".join(f"{V.PREFERENCES[k]}: {t}" for k, t in V.PREFERENCE_HELP.items()))
+            if ops.cfg.preference == "balanced":
+                st.caption("Balanced weights")
                 st.slider("Time", 0.0, 3.0, step=0.25, key="cfg_w_time", on_change=on_cfg, args=("weights",))
                 st.slider("Cost", 0.0, 3.0, step=0.25, key="cfg_w_cost", on_change=on_cfg, args=("weights",))
                 st.slider("Risk", 0.0, 3.0, step=0.25, key="cfg_w_risk", on_change=on_cfg, args=("weights",))
-        st.multiselect("Avoid chokepoints", list(CHOKEPOINTS), key="cfg_avoid", format_func=CHOKEPOINTS.get,
-                       on_change=on_cfg, args=("avoid",), help="Treated as closed for this voyage (operator policy).")
-        e1, e2 = st.columns(2)
-        e1.number_input("Berth wait (h)", 0.0, 240.0, step=6.0, key="cfg_port_delay", on_change=on_cfg,
-                        args=("port_delay_hours",), help="Baseline waiting time at the destination port.")
-        e2.number_input("Extra canal delay (h)", 0.0, 240.0, step=6.0, key="cfg_canal_delay", on_change=on_cfg,
-                        args=("canal_delay_hours",), help="Added to the modelled queue at every canal transit.")
-
-        st.markdown('<div class="section-name" style="margin-top:18px">Simulation</div>', unsafe_allow_html=True)
-        b1, b2, b3 = st.columns(3)
-        v = ops.voyage
-        if ops.playing:
-            b1.button("Pause", on_click=cb(ops.pause), width="stretch")
-        elif v.status == "planned" and v.t == 0:
-            b1.button("Start", type="primary", on_click=cb(ops.start), width="stretch",
-                      disabled=v.status == "blocked")
-        else:
-            b1.button("Resume", type="primary", on_click=cb(ops.resume), width="stretch",
-                      disabled=v.status in ("blocked", "arrived"))
-        b2.button("+1 day", on_click=cb(ops.advance_hours, 24.0), width="stretch",
-                  disabled=v.status in ("blocked", "arrived"))
-        b3.button("Reset", on_click=cb(ops.reset), width="stretch")
-        st.radio("Playback speed (simulated hours per second)", list(SPEEDS), key="play_speed", horizontal=True,
-                 on_change=on_speed)
-
-        st.markdown('<div class="section-name" style="margin-top:18px">Incident management</div>', unsafe_allow_html=True)
-        st.caption("Scenarios are simulated, not real-world closures. The voyage re-routes from the ship's current position.")
-        for key in ("suez_blockage", "bab_el_mandeb_closure", "hormuz_blockade", "panama_closure"):
-            label = {"suez_blockage": "Suez Canal closed", "hormuz_blockade": "Strait of Hormuz closed"}.get(
-                key, EVENT_BY_KEY[key].label)
-            st.toggle(label, key=f"inc_{key}", on_change=on_incident, args=(key,), help=EVENT_BY_KEY[key].help)
-        st.slider("Red Sea security escalation", 0.0, 1.0, step=0.05, key="inc_red_sea_escalation",
-                  on_change=on_incident, args=("red_sea_escalation",), help=EVENT_BY_KEY["red_sea_escalation"].help)
-        f1, f2 = st.columns(2)
-        f1.slider("Suez fee ×", 1.0, 10.0, step=0.5, key="inc_suez_toll_multiplier", on_change=on_incident,
-                  args=("suez_toll_multiplier",))
-        f2.slider("Panama fee ×", 1.0, 5.0, step=0.5, key="inc_panama_toll_multiplier", on_change=on_incident,
-                  args=("panama_toll_multiplier",))
-        with st.expander("Severe weather on route"):
+            st.multiselect("Avoid chokepoints", list(CHOKEPOINTS), key="cfg_avoid", format_func=CHOKEPOINTS.get,
+                           on_change=on_cfg, args=("avoid",), help="Treated as closed for this voyage.")
+        with st.expander("Canal & berth delays", expanded=False):
+            st.number_input("Berth wait at destination (h)", 0.0, 240.0, step=6.0, key="cfg_port_delay",
+                            on_change=on_cfg, args=("port_delay_hours",))
+            st.number_input("Extra delay per canal transit (h)", 0.0, 240.0, step=6.0, key="cfg_canal_delay",
+                            on_change=on_cfg, args=("canal_delay_hours",))
+            p1, p2 = st.columns(2)
+            cport = p1.selectbox("Congested port", port_ids, index=port_ids.index(ops.cfg.destination),
+                                 key="cong_port", format_func=lambda p: ports[p])
+            chrs = p2.number_input("Extra wait (h)", 0.0, 480.0, 48.0, 12.0, key="cong_hours")
+            st.button("Apply port congestion (scenario)", on_click=cb(ops.set_congestion, cport, chrs),
+                      width="stretch")
+        with st.expander("Storm scenario", expanded=False):
             w1, w2 = st.columns(2)
             wave = w1.number_input("Wave height (m)", 2.0, 15.0, 6.0, 0.5, key="storm_wave")
             rad = w2.number_input("Radius (nm)", 100.0, 1000.0, 300.0, 50.0, key="storm_radius")
             s1, s2 = st.columns(2)
-            s1.button("Storm ahead of ship", on_click=cb(ops.add_storm, wave, None, None, rad), width="stretch")
+            s1.button("Storm ahead", on_click=cb(ops.add_storm, wave, None, None, rad), width="stretch")
             s2.button("Clear storms", on_click=cb(ops.clear_storms), width="stretch",
                       disabled=not ops.settings["storm_cells"])
-            st.caption(f"Cores with waves ≥ 5 m are avoided when an alternative exists. "
-                       f"Active storms: {len(ops.settings['storm_cells'])}.")
-        with st.expander("Port congestion"):
-            p1, p2 = st.columns(2)
-            cport = p1.selectbox("Port", port_ids, index=port_ids.index(ops.cfg.destination), key="cong_port",
-                                 format_func=lambda p: ports[p])
-            chrs = p2.number_input("Extra wait (h)", 0.0, 480.0, 48.0, 12.0, key="cong_hours")
-            st.button("Apply congestion", on_click=cb(ops.set_congestion, cport, chrs), width="stretch")
-        with st.expander("More scenarios"):
+            st.caption(f"Cores ≥ 5 m waves are avoided when an alternative exists. "
+                       f"Active storm cells: {len(ops.settings['storm_cells'])}.")
+        with st.expander("More scenarios & fees", expanded=False):
+            st.slider("Red Sea security escalation", 0.0, 1.0, step=0.05, key="inc_red_sea_escalation",
+                      on_change=on_incident, args=("red_sea_escalation",))
+            st.slider("Suez fee ×", 1.0, 10.0, step=0.5, key="inc_suez_toll_multiplier", on_change=on_incident,
+                      args=("suez_toll_multiplier",))
+            st.slider("Panama fee ×", 1.0, 5.0, step=0.5, key="inc_panama_toll_multiplier", on_change=on_incident,
+                      args=("panama_toll_multiplier",))
             st.slider("Taiwan Strait tension", 0.0, 1.0, step=0.05, key="inc_taiwan_tension",
                       on_change=on_incident, args=("taiwan_tension",))
             st.slider("Atlantic hurricane (severity)", 0.0, 1.0, step=0.05, key="inc_atlantic_hurricane",
@@ -349,92 +327,170 @@ def render_ui() -> None:
             preset = st.selectbox("Preset", list(PRESETS), key="preset_pick")
             st.button("Apply preset", on_click=cb(ops.apply_settings, PRESETS[preset], f"preset '{preset}'"),
                       width="stretch")
-        st.button("Clear all scenarios", on_click=cb(ops.clear_all), width="stretch", disabled=not describe(ops.settings))
-
-        # -------- Alerts
-        st.markdown('<div class="section-name" style="margin-top:18px">Alerts</div>', unsafe_allow_html=True)
-        alerts = []
-        if v.status == "blocked":
-            alerts.append(ui.alert("Voyage blocked", v.block_reason, "critical"))
-        if v.status == "arrived":
-            alerts.append(ui.alert("Arrived", f"Voyage complete after {v.t / 24:.1f} days.", "info"))
-        if any(l.note for l in v.legs if l.kind == "sail" and l.note):
-            alerts.append(ui.alert("Forced through", "No route avoids every storm / high-premium lane; the plan "
-                                   "passes through at least one of them.", ""))
-        if v.reroutes:
-            last = next((e for e in reversed(v.timeline) if e["kind"] == "reroute"), None)
-            if last:
-                alerts.append(ui.alert(f"Rerouted ({v.reroutes}×)", last["title"], "info"))
-        for d in describe(ops.settings):
-            alerts.append(ui.alert("Scenario active (simulated)", d, ""))
-        wx = ss.get("weather")
-        if wx and wx.get("worst") and wx["worst"]["level"] >= 2:
-            wr = wx["worst"]
-            alerts.append(ui.alert(f"Weather ahead: {wr['severity']}",
-                                   f"{wr['values'].get('wave_height')} m waves {wr['label'].lower()} at simulated ETA "
-                                   f"{wr['eta']:%b %d %H:%M} UTC (Open-Meteo). {wr['action']}", "critical" if wr["level"] == 3 else ""))
-        for adv in intel.advisories(intel.rank_news(ss["news"]["articles"], ops_route_chokepoints())) \
-                if ss.get("news") and ss["news"].get("articles") and not ss["news"].get("demo") else []:
-            alerts.append(ui.alert(f"News advisory: {adv['label']}", f"\"{adv['headline']}\" ({adv['source']}). "
-                                   "Unverified headline: no corridor closed. See News & Security to simulate it.", ""))
-        st.markdown("".join(alerts) or ui.alert("All clear", "No warnings for the current voyage.", "info"),
-                    unsafe_allow_html=True)
-        intel_box = st.container()
+        with st.expander("Data sources & methodology", expanded=False):
+            st.markdown(ui.METHODOLOGY, unsafe_allow_html=True)
 
     # ----------------------------------------------------------------------------------------------
-    # Main area
+    # Header
     # ----------------------------------------------------------------------------------------------
-    st.markdown(ui.topbar(), unsafe_allow_html=True)
+    state = ("blocked" if v.status == "blocked" else "arrived" if v.status == "arrived" else
+             "active" if ops.playing else "idle" if v.status == "planned" and v.t == 0 else "paused")
+    st.markdown(ui.topbar(state, llm_label), unsafe_allow_html=True)
     active = describe(ops.settings)
-    sub = ("Active scenarios: " + " · ".join(active)) if active else "No scenarios active."
-    st.markdown(ui._flat(f"""<div class="intro"><div class="eyebrow">◎ Live operations / dynamic rerouting / AI copilot</div>
-<h1>Plan it, sail it, break it, reroute it.</h1><p>Start a voyage and the simulated ship moves along the modelled lanes. Close a strait, raise a storm or ask the copilot, and the rest of the voyage is re-optimised from where the ship is now. {html.escape(sub)}</p></div>"""),
-                unsafe_allow_html=True)
+    st.markdown(f'<div class="subline">Live operations: plan, sail, disrupt and reroute a <b>simulated</b> vessel. '
+                f'{"Active scenarios (simulated): <b>" + html.escape(" · ".join(active)) + "</b>" if active else "No scenarios active."}'
+                f' <span class="intel-meta">Advanced settings: sidebar »</span></div>', unsafe_allow_html=True)
     tab_live, tab_stress = st.tabs(["Live operations", "Multi-agent stress test"])
 
     with tab_live:
-        left, right = st.columns([2.15, 1], gap="medium")
-        with left:
-            live_panel_factory(st, ss, ops, model, ui, V, HAS_FOLIUM, st_folium if HAS_FOLIUM else None,
-                               build_ops_base_map if HAS_FOLIUM else None, build_ops_layer if HAS_FOLIUM else None,
-                               on_seek)()
-        with right:
+        change = ops.demo if ops.demo else ops.last_change
+        if change:
+            st.markdown(ui.change_banner({"before": change["before"], "after": change["after"]},
+                                         demo=bool(ops.demo)), unsafe_allow_html=True)
+
+        # ---------------- Row 1: Voyage & Simulation | Alerts & Intelligence
+        top_l, top_r = st.columns([1.05, 1], gap="medium")
+        with top_l:
+            with st.container(border=True):
+                st.markdown('<div class="panel-title">Voyage & Simulation</div><div class="panel-sub">Ports, playback '
+                            'and scenario controls. Scenarios are SIMULATED, never real closures.</div>',
+                            unsafe_allow_html=True)
+                c1, c2, c3 = st.columns(3)
+                c1.selectbox("From", port_ids, key="cfg_origin", format_func=lambda p: ports[p],
+                             on_change=on_voyage, disabled=started)
+                c2.selectbox("To", port_ids, key="cfg_dest", format_func=lambda p: ports[p],
+                             on_change=on_voyage, disabled=started)
+                c3.selectbox("Vessel", list(VESSELS), key="cfg_vessel", format_func=lambda k: VESSELS[k].label,
+                             on_change=on_voyage, disabled=started,
+                             help="Bulk carriers use the tanker hull class and LNG carriers the container hull class "
+                                  "for fuel estimates.")
+                b1, b2, b3, b4 = st.columns([1.1, 1, 1, 1.6])
+                if ops.playing:
+                    b1.button("⏸ Pause", on_click=cb(ops.pause), width="stretch", key="btn_pause")
+                elif v.status == "planned" and v.t == 0:
+                    b1.button("▶ Start", type="primary", on_click=cb(ops.start), width="stretch", key="btn_start",
+                              disabled=v.status == "blocked")
+                else:
+                    b1.button("▶ Resume", type="primary", on_click=cb(ops.resume), width="stretch", key="btn_resume",
+                              disabled=v.status in ("blocked", "arrived"))
+                b2.button("+1 day", on_click=cb(ops.advance_hours, 24.0), width="stretch", key="btn_day",
+                          disabled=v.status in ("blocked", "arrived"))
+                b3.button("Reset", on_click=cb(ops.reset), width="stretch", key="btn_reset")
+                b4.selectbox("Playback (simulated h/s)", list(SPEEDS), key="play_speed", on_change=on_speed,
+                             label_visibility="collapsed")
+                if started:
+                    st.caption("Underway: ports and vessel are locked (Reset to change).")
+                dm1, dm2 = st.columns([1.6, 1])
+                dm1.button("↻ Replay hackathon demo" if ops.demo else "▶ Hackathon demo: Suez closure",
+                           type="primary", on_click=cb(ops.run_demo, "demo", True), width="stretch", key="demo_run",
+                           help="Rotterdam → Shanghai time-lapse to the Port Said approach, then a SIMULATED Suez "
+                                "closure diverts the ship via the Cape of Good Hope from where it is.")
+                if ops._pre_demo is not None:
+                    dm2.button("Exit demo", on_click=cb(ops.exit_demo), width="stretch", key="demo_exit",
+                               help="Restore the voyage, assumptions and scenarios you had before the demo.")
+                else:
+                    dm2.button("Instant demo", on_click=cb(ops.run_demo, "demo", False), width="stretch",
+                               key="demo_instant", help="Same scenario without the time-lapse.")
+                st.markdown('<div class="section-name" style="margin-top:6px">Incidents (simulated)</div>',
+                            unsafe_allow_html=True)
+                t1, t2 = st.columns(2)
+                for i, key in enumerate(("suez_blockage", "bab_el_mandeb_closure", "hormuz_blockade", "panama_closure")):
+                    label = {"suez_blockage": "Suez Canal closed", "bab_el_mandeb_closure": "Bab-el-Mandeb closed",
+                             "hormuz_blockade": "Hormuz closed", "panama_closure": "Panama Canal closed"}[key]
+                    (t1 if i % 2 == 0 else t2).toggle(label, key=f"inc_{key}", on_change=on_incident, args=(key,),
+                                                      help=EVENT_BY_KEY[key].help)
+                st.button("Clear all scenarios", on_click=cb(ops.clear_all), width="stretch", key="btn_clear",
+                          disabled=not describe(ops.settings))
+
+        with top_r:
+            with st.container(border=True):
+                st.markdown('<div class="panel-title">Alerts & Intelligence</div><div class="panel-sub">Active risks · '
+                            'live weather (Open-Meteo) · news & security headlines (advisory)</div>',
+                            unsafe_allow_html=True)
+                alerts = []
+                if v.status == "blocked":
+                    alerts.append(ui.alert("Voyage blocked", v.block_reason, "critical"))
+                if v.status == "arrived":
+                    alerts.append(ui.alert("Arrived", f"Voyage complete after {v.t / 24:.1f} days.", "info"))
+                if any(l.note for l in v.legs if l.kind == "sail" and l.note):
+                    alerts.append(ui.alert("Forced through", "No route avoids every storm / high-premium lane.", ""))
+                if v.reroutes:
+                    last = next((e for e in reversed(v.timeline) if e["kind"] == "reroute"), None)
+                    if last:
+                        alerts.append(ui.alert(f"Rerouted ({v.reroutes}×)", last["title"], "info"))
+                for d in active:
+                    alerts.append(ui.alert("Simulated scenario", d, ""))
+                wx = current_weather()
+                if wx and wx.get("worst") and wx["worst"]["level"] >= 2:
+                    wr = wx["worst"]
+                    alerts.append(ui.alert(f"Forecast hazard ahead: {wr['severity']} (Open-Meteo)",
+                                           f"{wr['values'].get('wave_height')} m waves {wr['label'].lower()} at simulated "
+                                           f"ETA {wr['eta']:%b %d %H:%M} UTC. {wr['action']}",
+                                           "critical" if wr["level"] == 3 else ""))
+                news = ss.get("news")
+                if news and news.get("articles") and not news.get("demo"):
+                    for adv in intel.advisories(intel.rank_news(news["articles"], ops_route_chokepoints())):
+                        alerts.append(ui.alert(f"News advisory (unverified): {adv['label']}",
+                                               f"\"{adv['headline']}\" ({adv['source']}). No corridor was closed.", ""))
+                st.markdown('<div style="max-height:150px;overflow-y:auto">'
+                            + ("".join(alerts) or ui.alert("All clear", "No warnings for the current voyage.", "info"))
+                            + "</div>", unsafe_allow_html=True)
+                intel_slot = st.container(height=300, border=False)
+
+        # ---------------- Row 2: Route KPIs (full width, ticks during playback)
+        kpi_fragment(st, ops, ui, V)()
+
+        # ---------------- Row 3: Live route map | Operations copilot
+        map_col, chat_col = st.columns([2.3, 1], gap="medium")
+        with map_col:
+            map_fragment(st, ss, ops, model, ui, V, HAS_FOLIUM, st_folium, build_ops_base_map, build_ops_layer,
+                         build_ops_map_html, components, on_seek, current_weather)()
+        with chat_col:
             chip = "mode-chip" if llm else "mode-chip cmd"
-            st.markdown(f'<div class="copilot-head"><div class="section-name" style="margin:0">AI Operations Copilot</div>'
-                        f'<span class="{chip}">{html.escape(llm_status)}</span></div>', unsafe_allow_html=True)
-            box = st.container(height=470, border=True)
-            with box:
+            st.markdown(f'<div class="copilot-head"><div class="panel-title">Operations Copilot</div>'
+                        f'<span class="{chip}">{html.escape(llm_label)}</span></div>', unsafe_allow_html=True)
+            with st.container(height=430, border=True):
                 if not ops.chat:
-                    st.markdown(md("Ask me to run the ship. I execute validated commands against the simulator "
-                                   "(the same functions as the sidebar) and answer from its real state."))
+                    st.markdown(md("Give me instructions (\"Close Suez and reroute my ship\") or ask questions "
+                                   "(\"What if Suez closes?\"). Questions and what-ifs never change the voyage; "
+                                   "what-ifs run on a copy and are labelled PREVIEW."))
                 for m in ops.chat[-40:]:
                     with st.chat_message(m["role"], avatar="🧭" if m["role"] == "assistant" else "👤"):
-                        if m.get("ops"):
-                            st.markdown("".join(f'<span class="op-chip">{html.escape(n)}'
-                                                f'{html.escape(json.dumps(a)) if a else ""}</span>'
-                                                for n, a in m["ops"]), unsafe_allow_html=True)
+                        if m["role"] == "assistant":
+                            tag = "LLM" if m.get("mode") == "llm" else "rules"
+                            chips = "".join(f'<span class="op-chip">{html.escape(n)}'
+                                            f'{html.escape(json.dumps(a)) if a else ""}</span>' for n, a in m.get("ops", []))
+                            st.markdown(f'<span class="op-chip">{tag}</span>{chips}', unsafe_allow_html=True)
                         st.markdown(md(m["content"]))
                         if m.get("rejected"):
                             st.caption("Rejected (failed validation): " + "; ".join(m["rejected"]))
             examples = [("Close Suez + reroute", "Close Suez and reroute my ship"),
+                        ("What if Suez closes?", "What if the Suez Canal closes?"),
                         ("Advance 5 days", "Advance the voyage by 5 days"),
                         ("6 m storm ahead", "A storm with 6 m waves is affecting our route. Reroute to avoid it."),
                         ("Safest route?", "What is the safest available route?"),
-                        ("Cape route cost?", "How much more expensive is the Cape of Good Hope route?"),
                         ("Pause + risk", "Pause the vessel and explain our current operational risk")]
-            ex_cols = st.columns(3)
+            ex_cols = st.columns(2)
             for i, (lab, ex) in enumerate(examples):
-                ex_cols[i % 3].button(lab, key=f"ex_{i}", on_click=on_chat, args=(ex,), width="stretch", help=ex)
-            st.chat_input("Command or question for the copilot…", key="chat_in", on_submit=on_chat)
+                ex_cols[i % 2].button(lab, key=f"ex_{i}", on_click=on_chat, args=(ex,), width="stretch", help=ex)
+            st.chat_input("Instruction or question…", key="chat_in", on_submit=on_chat)
 
-        # -------- decision + alternatives, timeline
+        # ---------------- Row 4: Rerouting decision & event timeline
+        st.markdown('<div class="panel-title" style="margin-top:14px">Rerouting decision & event timeline</div>'
+                    '<div class="panel-sub">Recommendation, before/after comparison and incident history '
+                    '(model estimates).</div>', unsafe_allow_html=True)
         d_left, d_right = st.columns([1.35, 1], gap="medium")
         with d_left:
-            st.markdown('<div class="section-name" style="margin-top:12px">Routing decision</div>', unsafe_allow_html=True)
-            if v.decision:
-                st.markdown(ui.decision(v.decision, v.status == "blocked"), unsafe_allow_html=True)
+            if change:
+                st.markdown(ui.recommendation(change, v.status, V.PREFERENCES[ops.cfg.preference]),
+                            unsafe_allow_html=True)
+                st.markdown(ui.comparison_table(change["before"], change["after"],
+                                                "Before (via Suez)" if ops.demo else "Before",
+                                                "After closure" if ops.demo else "After"), unsafe_allow_html=True)
             elif v.status == "blocked":
                 st.markdown(ui.decision(v.block_reason, True), unsafe_allow_html=True)
+            elif v.decision:
+                st.markdown(ui.decision(v.decision), unsafe_allow_html=True)
             opts = v.candidates if v.candidates else ops.options()
             if opts:
                 rows = []
@@ -443,105 +499,121 @@ def render_ui() -> None:
                     rows.append({"Option": c.name, "Selected": "✓" if c.chosen else "", "Corridor": s_.corridor,
                                  "Remaining nm": round(s_.nm), "Days": round(s_.hours / 24, 1),
                                  "All-in $M": round(s_.total_usd / 1e6, 2), "Fuel t": round(s_.fuel_t),
-                                 "Tolls $k": round(s_.toll_usd / 1e3), "Risk /100": round(s_.risk_index),
-                                 "Forced": "yes" if s_.forced else ""})
-                show_df(pd.DataFrame(rows), hide_index=True)
-                st.caption(("Candidates from the last re-evaluation. " if v.candidates else
-                            "Routes available from the ship's current position. ")
-                           + f"Objective: {V.PREFERENCES[ops.cfg.preference]} - {V.PREFERENCE_HELP[ops.cfg.preference]} "
-                             "Costs are modelled estimates for the remaining voyage.")
+                                 "Risk /100": round(s_.risk_index), "Forced": "yes" if s_.forced else ""})
+                with st.expander("Route options considered" + (" (last re-evaluation)" if v.candidates
+                                                                else " (from current position)"), expanded=False):
+                    show_df(pd.DataFrame(rows), hide_index=True)
+                    st.caption(f"Objective: {V.PREFERENCES[ops.cfg.preference]} - "
+                               f"{V.PREFERENCE_HELP[ops.cfg.preference]} Model estimates for the remaining voyage.")
+                    if v.decision:
+                        st.caption(md("Full rationale: " + v.decision))
         with d_right:
-            st.markdown('<div class="section-name" style="margin-top:12px">Event timeline</div>', unsafe_allow_html=True)
-            with st.container(height=380, border=False):
+            with st.container(height=360, border=False):
                 st.markdown(ui.timeline(v.timeline), unsafe_allow_html=True)
 
     with tab_stress:
-        stress_tab(st, ss, ops, model, G0, ports, ui, show_df, HAS_FOLIUM, components,
-                   build_folium_map if HAS_FOLIUM else None, st_folium if HAS_FOLIUM else None,
+        stress_tab(st, ss, ops, model, G0, ports, ui, show_df, HAS_FOLIUM, components, build_folium_map, st_folium,
                    build_map_html, make_agent, profile_matrix, edges_dataframe, HULL, CARGO_OWNERS, np)
 
-    st.markdown(ui.METHODOLOGY, unsafe_allow_html=True)
+    with st.expander("Data sources, model and limitations"):
+        st.markdown(ui.METHODOLOGY, unsafe_allow_html=True)
     st.markdown(ui.FOOTER, unsafe_allow_html=True)
 
     # ----------------------------------------------------------------------------------------------
-    # Live Maritime Intelligence: rendered last (into the sidebar slot below Alerts) so slow or failing
-    # network calls never delay the rest of the page. Refreshes itself every 10 minutes.
+    # Weather / News tabs: rendered LAST into their slot under Alerts, so slow or failing network calls never
+    # delay the rest of the page. Refreshes itself every 10 minutes; never runs on animation frames.
     # ----------------------------------------------------------------------------------------------
     @st.fragment(run_every=600)
     def intel_panel():
-        st.markdown('<div class="section-name" style="margin-top:18px">Live Maritime Intelligence</div>',
-                    unsafe_allow_html=True)
         t_w, t_n = st.tabs(["Weather", "News & Security"])
         with t_w:
-            render_weather(st, ss, ops, model, V, intel, cached_marine, cb, ui)
+            render_weather(st, ss, ops, V, intel, cached_marine, cb, flash)
         with t_n:
             render_news(st, ss, ops, intel, cached_news, cb, ops_route_chokepoints)
 
-    with intel_box:
+    with intel_slot:
         intel_panel()
 
 
 # ==================================================================================================
-# Live panel (fragment): KPIs, telemetry, map, time scrubber. Re-runs on its own every TICK_S while playing.
+# Fragments that re-run on their own every TICK_S while playing. Both call ops.tick(): the clock advances by REAL
+# elapsed time x playback speed, so whichever fragment runs first moves the ship and the other one sees ~0 s.
 # ==================================================================================================
-def live_panel_factory(st, ss, ops, model, ui, V, has_folium, st_folium, build_base, build_layer, on_seek):
-    import json
-
+def kpi_fragment(st, ops, ui, V):
     @st.fragment(run_every=TICK_S if ops.playing else None)
-    def live_panel():
+    def kpis():
         was_playing = ops.playing
         ops.tick()
-        if was_playing and not ops.playing:      # arrived or blocked during playback: refresh the whole page
+        if was_playing and not ops.playing:      # arrived / blocked / demo trigger: refresh the whole page
             st.rerun()
         v, G = ops.voyage, ops.G
         s = V.ship_state(v, G)
         p = V.projected(v, G)
-        # KPI cards
         if v.status == "blocked":
-            eta = ("BLOCKED", "No feasible passage - ship holding position", "red")
+            eta = ("BLOCKED", "No feasible passage: ship holding position", "red")
         elif v.status == "arrived":
             eta = (f"{p['eta']:%b %d %H:%M}", f"Arrived after {v.t / 24:.1f} days", "mint")
         else:
-            eta = (f"{p['eta']:%b %d %H:%M}", f"UTC · {s.remaining_h / 24:.1f} days to go", "")
+            eta = (f"{p['eta']:%b %d %H:%M} UTC", f"{s.remaining_h / 24:.1f} days to go (simulated clock)", "")
         risk = p["remaining_risk_index"] if v.status != "arrived" else p["risk_index"]
-        cards = [("ETA (simulated)", eta[0], eta[1], eta[2]),
-                 ("Distance remaining", f"{s.remaining_nm:,.0f} nm", f"{s.traveled_nm:,.0f} nm sailed", "blue"),
-                 ("Projected fuel", f"{p['fuel_t']:,.0f} t", f"${p['fuel_usd'] / 1e6:,.2f}M at ${ops.cfg.fuel_price:,.0f}/t", ""),
-                 ("Projected all-in cost", ui._usd(p["total_usd"]),
-                  f"spent {ui._usd(p['spent_usd'])} · tolls {ui._usd(p['toll_usd'])}", "gold"),
-                 ("Risk index ahead", f"{risk:.0f}/100", V.risk_label(risk) + " · modelled",
-                  "red" if risk >= 65 else "gold" if risk >= 45 else "mint")]
+        cards = [("ETA", eta[0], eta[1], eta[2], True),
+                 ("Distance remaining", f"{s.remaining_nm:,.0f} nm", f"{s.traveled_nm:,.0f} nm sailed", "blue", False),
+                 ("Projected cost", ui._usd(p["total_usd"]),
+                  f"fuel {p['fuel_t']:,.0f} t · tolls {ui._usd(p['toll_usd'])} · spent {ui._usd(p['spent_usd'])}",
+                  "gold", True),
+                 ("Risk ahead", f"{risk:.0f}/100", V.risk_label(risk) + " (synthetic risk model)",
+                  "red" if risk >= 65 else "gold" if risk >= 45 else "mint", True)]
         st.markdown(ui.metric_cards(cards), unsafe_allow_html=True)
         state = ("blocked" if v.status == "blocked" else "playing" if ops.playing else
                  "idle" if v.status == "planned" and v.t == 0 else "paused")
         clock = V.calendar(v, v.t)
         st.markdown(ui.live_strip(state, [
             ("Sim clock", f"{clock:%Y-%m-%d %H:%M} UTC"), ("Day", f"{v.t / 24:.1f}"),
-            ("Pos", f"{s.lat:.2f}, {s.lon:.2f}"), ("Course", f"{s.course_deg:03.0f}°"), ("SOG", f"{s.sog_kn:.1f} kn"),
-            ("Status", s.activity), ("Playback", f"{ops.speed:g} h/s")]), unsafe_allow_html=True)
+            ("SIMULATED position", f"{s.lat:.2f}, {s.lon:.2f}"), ("Course", f"{s.course_deg:03.0f}°"),
+            ("SOG", f"{s.sog_kn:.1f} kn"), ("Status", s.activity)], jump_h=ops.speed * TICK_S),
+            unsafe_allow_html=True)
+    return kpis
 
+
+def map_fragment(st, ss, ops, model, ui, V, has_folium, st_folium, build_base, build_layer, build_svg, components,
+                 on_seek, current_weather):
+    import json
+
+    @st.fragment(run_every=TICK_S if ops.playing else None)
+    def live_map():
+        was_playing = ops.playing
+        ops.tick()
+        if was_playing and not ops.playing:
+            st.rerun()
+        v, G = ops.voyage, ops.G
+        s = V.ship_state(v, G)
         done, ahead, _ = V.split_at(v, G)
         done_pts, ahead_pts = V.legs_polyline(G, done), V.legs_polyline(G, ahead)
-        if done_pts and ahead_pts:
-            ahead_pts = [done_pts[-1]] + ahead_pts if done_pts[-1] != ahead_pts[0] else ahead_pts
+        if done_pts and ahead_pts and done_pts[-1] != ahead_pts[0]:
+            ahead_pts = [done_pts[-1]] + ahead_pts
         wps = V.waypoints(v, G)
-        if has_folium:
+        alts = [(c.name, V.legs_polyline(G, c.summary.legs)) for c in v.candidates
+                if not c.chosen and c.name != "Hold course"]
+        color = {"Container": "#58aaff", "Tanker": "#f5bf75"}.get(V.VESSELS[ops.cfg.vessel_key].vessel_type)
+        modes = ["Interactive map", "Offline map"] if has_folium else ["Offline map"]
+        h1, h2 = st.columns([3, 1.3])
+        h1.markdown('<div class="panel-title">Live route map <span class="tag-sim">SIMULATED POSITION · NOT AIS</span>'
+                    '</div>', unsafe_allow_html=True)
+        mode = h2.selectbox("Map", modes, key="map_mode", label_visibility="collapsed",
+                            help="Offline map: no tiles or folium needed (use it if map tiles are blocked).")
+        if mode == "Interactive map":
             base_key = json.dumps(ops.settings, sort_keys=True, default=str)
-            if ss.get("_base_key") != base_key:
+            if ss.get("_base_key") != base_key:             # static layers rebuilt only when scenarios change
                 ctx = V.build_context(ops.cfg, ops.settings, model)
                 ss["_base_map"] = build_base(ctx.G, ops.settings)
                 ss["_base_key"] = base_key
-            alts = [(c.name, V.legs_polyline(G, c.summary.legs)) for c in v.candidates
-                    if not c.chosen and c.name != "Hold course"]
-            wx = ss.get("weather") or {}
-            color = {"Container": "#58aaff", "Tanker": "#f5bf75"}.get(V.VESSELS[ops.cfg.vessel_key].vessel_type)
+            wx = current_weather() or {}
             layer = build_layer(G, v, done_pts, ahead_pts, wps, s, alts, wx.get("points", []), color)
-            st.markdown(ui.panel_head("Voyage map", "Simulated live tracking · not AIS"), unsafe_allow_html=True)
             base = ss["_base_map"]
-            out = st_folium(base, feature_group_to_add=layer, key="ops_map", height=500,
+            out = st_folium(base, feature_group_to_add=layer, key="ops_map", height=520,
                             use_container_width=True, returned_objects=["last_object_clicked"])
-            # st_folium attaches the dynamic layer to the map object; detach it so the cached base map's script
-            # stays byte-identical and only the voyage layer is pushed (no map reload / flicker per tick).
+            # st_folium attaches the dynamic layer to the map object; detach it so the cached base map's script stays
+            # byte-identical: only the voyage layer is pushed each tick (no reload, zoom/pan preserved).
             for k in [k for k in base._children if k.startswith("feature_group_")]:
                 del base._children[k]
             click = (out or {}).get("last_object_clicked")
@@ -553,55 +625,68 @@ def live_panel_factory(st, ss, ops, model, ui, V, has_folium, st_folium, build_b
                     ops.seek(near["t"])
                     st.rerun(scope="fragment")
         else:
-            st.caption("folium / streamlit-folium not installed: simplified map.")
-            pts = pd.DataFrame([{"lat": a, "lon": b} for a, b in done_pts + ahead_pts] + [{"lat": s.lat, "lon": s.lon}])
-            st.map(pts, size=20)
+            ctx = V.build_context(ops.cfg, ops.settings, model)
+            components.html(build_svg(ctx.G, ops.settings, done_pts, ahead_pts, v.superseded, alts,
+                                      v.blocked_remaining, s, v.status, color, height=500), height=508)
         total = max(v.total_hours, 0.1)
         ss["seek_h"] = float(min(round(v.t, 1), total))
-        st.slider("Voyage time (hours since departure) - drag to jump, or click a waypoint on the map",
-                  0.0, float(total), step=1.0, key="seek_h", on_change=on_seek,
-                  disabled=v.status == "blocked" or not v.legs)
-        st.caption("Legend: mint = completed track · solid = remaining plan · grey dashed = superseded route · "
-                   "amber dotted = alternatives considered · red dashed = blocked plan · circles = Open-Meteo "
-                   "forecast at the simulated ETA. The ship icon is a SIMULATED position.")
-
-    return live_panel
+        st.slider("Voyage time (hours since departure): drag to jump, or click a waypoint", 0.0, float(total),
+                  step=1.0, key="seek_h", on_change=on_seek, disabled=v.status == "blocked" or not v.legs)
+        st.caption("Mint = completed track · solid = remaining plan · grey dashed = superseded route · amber dotted = "
+                   "alternatives considered · red dashed = blocked plan · circles = Open-Meteo forecast at the "
+                   "simulated ETA · purple = storm scenario.")
+    return live_map
 
 
 # ==================================================================================================
 # Live Maritime Intelligence: Weather and News & Security tabs
 # ==================================================================================================
-def render_weather(st, ss, ops, model, V, intel, cached_marine, cb, ui):
+def render_weather(st, ss, ops, V, intel, cached_marine, cb, flash):
     import html
     import time
     G = ops.G
     v = ops.voyage
     now = time.time()
-    if v.status == "arrived":
-        st.caption("Voyage complete: no remaining route to forecast.")
+    f1, f2 = st.columns([1.5, 1])
+    fi_on = f1.toggle("Forecast-informed simulation", key="fi_mode",
+                      help="Opt-in: Open-Meteo hazards ahead of the ship (waves ≥ threshold at the simulated ETA) "
+                           "become labelled SIMULATED storm cells and the remaining route is re-assessed. "
+                           "Not a navigation recommendation.")
+    thr = f2.number_input("Hazard ≥ (m)", 2.0, 12.0, 4.0, 0.5, key="fi_threshold",
+                          help="Significant wave height that counts as a hazard.")
+    if v.status == "arrived" or not v.legs:
+        st.caption("No remaining route to forecast.")
         return
+    sig = V.route_signature(v)
     pts = V.remaining_samples(v, G)
     coords = tuple((round(p["lat"], 1), round(p["lon"], 1)) for p in pts)
     if now < ss.get("_wx_backoff", 0):
-        w = _stale_or_none(ss.get("_wx_last"), ss.get("_wx_err", "provider unavailable"), intel)
+        w = intel.reuse_or_unavailable(ss.get("_wx_last"), sig, ss.get("_wx_err", "provider unavailable"))
     else:
         try:
             with st.spinner("Fetching Open-Meteo marine forecast…"):
                 raw = cached_marine(coords)
-            w = intel.assess_weather(raw, pts, ops.cfg.departure)
+            w = intel.with_route(intel.assess_weather(raw, pts, ops.cfg.departure), sig, coords)
             ss["_wx_last"] = w
         except intel.IntelError as e:
             ss["_wx_backoff"], ss["_wx_err"] = now + 120, str(e)
-            w = _stale_or_none(ss.get("_wx_last"), str(e), intel)
+            w = intel.reuse_or_unavailable(ss.get("_wx_last"), sig, str(e))
+    if w.get("status") != "unavailable":
+        w = dict(w, route_sig=sig)
     ss["weather"] = w
-    status = w["status"] + (" · stale" if w.get("stale") else "")
-    st.markdown(f'<div class="intel-meta">Status: <b>{html.escape(status)}</b> · {html.escape(w["source"])}'
-                + (f' · fetched {html.escape(w["fetched_at"])} UTC' if w.get("fetched_at") else "") + "</div>",
-                unsafe_allow_html=True)
+    if fi_on:
+        msg = ops.apply_forecast_hazards(w, thr)
+        if msg:
+            flash(msg)
+            st.rerun()                               # re-plan visible everywhere (converges: cells only accumulate)
+    status = w["status"] + (" · STALE" if w.get("stale") else "")
+    st.markdown(f'<div class="intel-meta"><span class="tag-live">LIVE DATA</span> Status: <b>{html.escape(status)}</b> · '
+                f'{html.escape(w["source"])}' + (f' · fetched {html.escape(w["fetched_at"])} UTC' if w.get("fetched_at")
+                                                 else "") + "</div>", unsafe_allow_html=True)
     if w.get("note"):
         st.caption(w["note"])
     if not w["points"]:
-        st.caption("Weather is unavailable; the simulator keeps running on its synthetic sea-state model.")
+        st.caption("The simulator keeps running on its synthetic sea-state model.")
         return
     rows = []
     for p in w["points"]:
@@ -614,6 +699,9 @@ def render_weather(st, ss, ops, model, V, intel, cached_marine, cb, ui):
                       + (f" · wind {vals.get('wind_speed_10m')} kn" if vals.get("wind_speed_10m") is not None else "")
                       + (f" · current {vals.get('ocean_current_velocity')} km/h" if vals.get("ocean_current_velocity") is not None else "")
                       + (f" · SST {vals.get('sea_surface_temperature')} °C" if vals.get("sea_surface_temperature") is not None else ""))
+            if (vals.get("wave_height") or 0) >= thr:
+                detail += f" · HAZARD (≥ {thr:g} m): " + intel.operational_impact(vals.get("wave_height"),
+                                                                                  vals.get("wind_speed_10m"))
         else:
             detail = p["status"]
         rows.append(f'<div class="intel-row"><b>{html.escape(p["label"])}</b> {sev}<br>{html.escape(detail)}'
@@ -621,20 +709,16 @@ def render_weather(st, ss, ops, model, V, intel, cached_marine, cb, ui):
                     + (f' · {html.escape(p["action"])}' if p["level"] >= 1 else "") + "</div></div>")
     st.markdown("".join(rows), unsafe_allow_html=True)
     worst = w.get("worst")
-    if worst and worst["level"] >= 2:
+    if worst and worst["level"] >= 2 and not fi_on:
         st.button(f"Simulate storm at worst point ({worst['values'].get('wave_height')} m)", key="wx_storm",
                   on_click=cb(ops.add_storm, max(float(worst["values"].get("wave_height") or 5.0), 5.0),
                               worst["lat"], worst["lon"], 250.0, f"forecast {worst['label'].lower()}",
                               "manual", "open-meteo"), width="stretch")
-    st.caption("Forecast values are matched to the ship's SIMULATED arrival time at each point. Data: Open-Meteo "
-               "(CC BY 4.0). Advisory only; the router uses the synthetic sea-state model plus any storm scenarios.")
-
-
-def _stale_or_none(last, err, intel):
-    if last:
-        return dict(last, stale=True, status=last["status"],
-                    note=f"Live refresh failed ({err}); showing the last successful forecast from {last['fetched_at']} UTC.")
-    return intel.weather_unavailable(f"Weather unavailable: {err}")
+    if any(c.get("source") == ops.FORECAST_SOURCE for c in ops.settings["storm_cells"]):
+        st.button("Remove forecast-informed storm cells", key="fi_clear", on_click=cb(ops.clear_forecast_hazards),
+                  width="stretch")
+    st.caption("Forecasts are matched to the ship's SIMULATED arrival time at each point. Data: Open-Meteo (CC BY 4.0). "
+               "Advisory unless forecast-informed simulation is on; even then the result is a modelled scenario.")
 
 
 def render_news(st, ss, ops, intel, cached_news, cb, route_fn):
@@ -695,12 +779,12 @@ def render_news(st, ss, ops, intel, cached_news, cb, route_fn):
 
 
 # ==================================================================================================
-# Original multi-agent stress test (now a tab; uses the shared incident settings from the sidebar)
+# Original multi-agent stress test (now a tab; uses the shared scenario settings)
 # ==================================================================================================
 def stress_tab(st, ss, ops, model, G0, ports, ui, show_df, has_folium, components, build_folium_map, st_folium,
                build_map_html, make_agent, profile_matrix, edges_dataframe, HULL, CARGO_OWNERS, np):
     port_ids = list(ports)
-    st.caption("Two agents with different economics face the same scenarios (set in the sidebar's incident panel): "
+    st.caption("Two agents with different economics face the same scenarios (the incidents in Voyage & Simulation plus the sidebar's advanced scenarios): "
                "a container ship and an oil tanker, each re-routed by its own cost function.")
     c = st.columns([1.4, 1, 1, 1, 1, 1.1, 1])
     owner = c[0].selectbox("Container cargo owner", ["high_margin", "low_margin"], key="st_owner",

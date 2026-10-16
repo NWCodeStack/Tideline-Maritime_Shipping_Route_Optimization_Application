@@ -862,6 +862,13 @@ def remaining_samples(v: Voyage, G: nx.Graph, every_nm: float = 900.0, limit: in
     return pts
 
 
+def route_signature(v: Voyage) -> str:
+    """Identity of the itinerary (endpoints, departure, lanes and their sailed fractions). Changes on every reroute,
+    reset or new voyage; used to decide whether cached route-specific data (e.g. a weather assessment) still applies."""
+    lanes = ";".join(f"{l.x}-{l.y}:{l.f0:.4f}-{l.f1:.4f}" for l in v.legs if l.kind == "sail")
+    return f"{v.config.origin}>{v.config.destination}@{v.config.departure.isoformat()}|{v.status == 'blocked'}|{lanes}"
+
+
 def vessel_choices() -> dict[str, str]:
     return {k: v.label for k, v in VESSELS.items()}
 
