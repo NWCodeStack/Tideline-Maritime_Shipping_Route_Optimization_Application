@@ -452,6 +452,20 @@ def arrival_lane(done: list, pos: Position) -> tuple[str, str] | None:
     return (last.x, last.y) if last is not None and last.y == pos.node else None
 
 
+def nearest_reachable_port(G: nx.Graph, H: nx.DiGraph, start: str, dest: str) -> tuple[str, float] | None:
+    """(port, great-circle nm to ``dest``) of the port closest to an unreachable ``dest`` that the ship can still
+    reach, or None. ``H`` is the lane graph the search used (closures removed) and ``start`` the ship's node in it.
+    The port the ship is already sitting at does not count: that case is reported separately."""
+    if start not in H:
+        return None
+    d = G.nodes[dest]
+    ports = [n for n in nx.descendants(H, start) if n != dest and n in G and G.nodes[n]["kind"] == "port"]
+    if not ports:
+        return None
+    best = min(ports, key=lambda n: haversine_nm(G.nodes[n]["lat"], G.nodes[n]["lon"], d["lat"], d["lon"]))
+    return best, haversine_nm(G.nodes[best]["lat"], G.nodes[best]["lon"], d["lat"], d["lon"])
+
+
 def route_from(ctx: Context, pos: Position, dest: str, pref: str, via: str | None = None,
                add_berth: bool = True, prev_lane: tuple[str, str] | None = None) -> RouteSummary:
     """Best route from ``pos`` to ``dest`` under ``pref``. Strict pass first (no storm-closed / over-premium lanes),
@@ -523,9 +537,16 @@ def route_from(ctx: Context, pos: Position, dest: str, pref: str, via: str | Non
     closed = sorted({f"{CHOKEPOINTS.get(ctx.G.edges[tuple(k)]['chokepoint'], '/'.join(sorted(k)))}: {c.hard_block}"
                      for k, c in ctx.costs.items() if c.hard_block})
     where = pos.node and G.nodes[pos.node]["name"] or f"the ship's position near {G.nodes[pos.x]['name']}"
+    near = nearest_reachable_port(G, H, start, dest)
+    if near:
+        hint = f" Nearest port still reachable: {G.nodes[near[0]]['name']}, {near[1]:,.0f} nm from {G.nodes[dest]['name']}."
+    elif pos.node is not None and G.nodes[pos.node]["kind"] == "port":
+        hint = f" The ship is at {where}, the only port it can still reach."
+    else:
+        hint = ""
     return RouteSummary(label=pref, feasible=False,
                         reason=f"No feasible sea passage from {where} to {G.nodes[dest]['name']}. "
-                               + ("Closed: " + "; ".join(closed[:4]) + "." if closed else ""))
+                               + ("Closed: " + "; ".join(closed[:4]) + "." if closed else "") + hint)
 
 
 def reprice(ctx: Context, legs: list, label: str = "Hold course") -> RouteSummary:
