@@ -28,3 +28,7 @@ dist/
 # Generated artefacts
 *.pkl
 *.log
+
+# Coverage artefacts
+.coverage
+htmlcov/

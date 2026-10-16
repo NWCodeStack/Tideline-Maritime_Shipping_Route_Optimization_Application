@@ -18,7 +18,7 @@ hackathon project (c0mpiled-14, YC RFS *Operating Systems for the Physical World
 * a one-click hackathon demo (simulated Suez closure -> Cape of Good Hope diversion);
 * the original multi-agent stress test (container ship vs oil tanker) kept as a second tab.
 
-Repo: `C:\Users\nashe\Documents\maritime-stress-tester` (git, branch `main`, no remote yet - **not pushed or deployed**).
+Repo: `maritime-stress-tester/` (git, branch `main`, no remote yet - **not pushed or deployed**).
 
 ## Commands
 
