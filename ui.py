@@ -87,6 +87,8 @@ div[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:10px}
 .src{font-size:11px;border:1px solid #2a5668;border-radius:4px;padding:0 5px;margin-left:6px;color:#8fd3e6;text-transform:uppercase;letter-spacing:.05em}
 .decision{border:1px solid #2a5668;background:#0c2030;border-radius:10px;padding:11px 14px;font-size:13.5px;color:#c9dfeb;line-height:1.55;margin-bottom:10px}
 .decision.blocked{border-color:#894351;background:#2a1b24;color:#ffc0c3}
+.decision.stay{border-color:#2a6a58;background:#0c2422}
+.decision.change{border-color:#8a7030;background:#271f12;color:#f0dfb8}
 .reco{border:1px solid #2c8b7b;background:#0c2a2a;border-radius:12px;padding:12px 16px;margin-bottom:10px}
 .reco.blocked{border-color:#894351;background:#2a1b24}
 .reco h3{font:600 17px 'Space Grotesk',sans-serif;margin:0 0 4px;color:var(--ink)}
@@ -226,8 +228,10 @@ def demo_panel(before: dict, after: dict) -> str:
     return comparison_table(before, after, "Before (via Suez)", "After closure")
 
 
-def decision(text: str, blocked: bool = False) -> str:
-    return f'<div class="decision{" blocked" if blocked else ""}">{html.escape(text)}</div>'
+def decision(text: str, blocked: bool = False, rec: str = "") -> str:
+    """Decision card; ``rec`` ("stay" | "change_course") tints it so the recommendation reads at a glance."""
+    kind = " blocked" if blocked else {"stay": " stay", "change_course": " change"}.get(rec, "")
+    return f'<div class="decision{kind}">{html.escape(text)}</div>'
 
 
 def panel_head(title: str, label: str = "") -> str:

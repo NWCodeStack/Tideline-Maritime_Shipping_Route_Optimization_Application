@@ -490,7 +490,7 @@ def render_ui() -> None:
             elif v.status == "blocked":
                 st.markdown(ui.decision(v.block_reason, True), unsafe_allow_html=True)
             elif v.decision:
-                st.markdown(ui.decision(v.decision), unsafe_allow_html=True)
+                st.markdown(ui.decision(v.decision, rec=v.recommendation), unsafe_allow_html=True)
             opts = v.candidates if v.candidates else ops.options()
             if opts:
                 rows = []
@@ -632,7 +632,7 @@ def map_fragment(st, ss, ops, model, ui, V, has_folium, st_folium, build_base, b
         ss["seek_h"] = float(min(round(v.t, 1), total))
         st.slider("Voyage time (hours since departure): drag to jump, or click a waypoint", 0.0, float(total),
                   step=1.0, key="seek_h", on_change=on_seek, disabled=v.status == "blocked" or not v.legs)
-        st.caption("Mint = completed track · solid = remaining plan · grey dashed = superseded route · amber dotted = "
+        st.caption("Mint = completed track · solid = remaining plan · grey dashed = previous committed route · amber dotted = "
                    "alternatives considered · red dashed = blocked plan · circles = Open-Meteo forecast at the "
                    "simulated ETA · purple = storm scenario.")
     return live_map

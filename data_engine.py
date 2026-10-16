@@ -205,6 +205,7 @@ NODE_DEFS: dict[str, tuple] = {
     "NATL": ("North Atlantic (north)", 42.0, -40.0, "waypoint", None),
     "SA": ("North Atlantic (south)", 35.5, -40.0, "waypoint", None),
     "ANN": ("Atlantic (northeast of Puerto Rico)", 21.5, -65.5, "waypoint", None),
+    "GUI1": ("Off the Guianas", 12.0, -50.0, "waypoint", None),
     "MON": ("Mona Passage", 18.2, -67.9, "waypoint", None),
     "CAR1": ("Caribbean Sea", 14.0, -75.0, "waypoint", None),
     "COL": ("Colon (Caribbean mouth)", 9.7, -79.9, "chokepoint", "panama"),
@@ -370,6 +371,10 @@ EDGE_DEFS: list[tuple] = [
     ("SAT2", "SAT3", {}),
     ("SAT3", "SAT4", {}),
     ("SAT4", "ATL5", {}),
+    # South American Atlantic coast, offshore: a ship off Brazil can reach the Caribbean (and Panama) directly
+    # instead of backtracking across the Atlantic via West Africa.
+    ("ANN", "GUI1", {}),
+    ("GUI1", "SAT4", {}),
 ]
 
 

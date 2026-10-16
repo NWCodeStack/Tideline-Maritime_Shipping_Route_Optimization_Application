@@ -342,14 +342,15 @@ class Ops:
         """Feasible routes from the current position under each preference, without changing anything."""
         G = self.G
         ctx = V.build_context(self.cfg, self.settings, self.model)
-        _, ahead, pos = V.split_at(self.voyage, G)
+        done, ahead, pos = V.split_at(self.voyage, G)
+        prev_lane = V.arrival_lane(done, pos)
         out: list[V.Candidate] = []
         if ahead:
             hold = V.reprice(ctx, ahead)
             if hold.feasible:
                 out.append(V.Candidate("Current route", hold, chosen=True))
         for pref, label in V.PREFERENCES.items():
-            s = V.route_from(ctx, pos, self.cfg.destination, pref)
+            s = V.route_from(ctx, pos, self.cfg.destination, pref, prev_lane=prev_lane)
             if s.feasible and not any(V._same(s, c.summary) for c in out):
                 out.append(V.Candidate(label, s))
         return out
@@ -360,9 +361,10 @@ class Ops:
             return "Unknown corridor."
         G = self.G
         ctx = V.build_context(self.cfg, self.settings, self.model)
-        _, ahead, pos = V.split_at(self.voyage, G)
+        done, ahead, pos = V.split_at(self.voyage, G)
         cur = V.reprice(ctx, ahead) if ahead else None
-        alt = V.route_from(ctx, pos, self.cfg.destination, self.cfg.preference, via=node)
+        alt = V.route_from(ctx, pos, self.cfg.destination, self.cfg.preference, via=node,
+                           prev_lane=V.arrival_lane(done, pos))
         name = G.nodes[node]["name"]
         if not alt.feasible:
             return f"No feasible route via {name}: {alt.reason}"

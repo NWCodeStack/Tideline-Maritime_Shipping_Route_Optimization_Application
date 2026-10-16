@@ -155,7 +155,7 @@ def build_ops_layer(G, voyage, done_pts, ahead_pts, waypoints, ship, candidates_
     for pts in voyage.superseded:
         if len(pts) > 1:
             folium.PolyLine(unwrap(pts), color=MUTED, weight=2.5, opacity=0.8, dash_array="6 8",
-                            tooltip="Previous remaining route (superseded by reroute)").add_to(fg)
+                            tooltip="Committed route before the change (dashed); the new route is solid").add_to(fg)
     if voyage.blocked_remaining and len(voyage.blocked_remaining) > 1:
         folium.PolyLine(unwrap(voyage.blocked_remaining), color=RED, weight=3, opacity=0.9, dash_array="4 6",
                         tooltip="Planned route - BLOCKED").add_to(fg)

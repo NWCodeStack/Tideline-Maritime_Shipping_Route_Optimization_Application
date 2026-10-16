@@ -51,6 +51,9 @@ PREFERENCE_HELP = {
 VIRTUAL = "__VESSEL__"
 FORCED_PENALTY = 2.0               # a route through storm-closed / over-premium lanes must be 2x better to win
 REROUTE_TOLERANCE = 0.005          # keep the current route unless the alternative is >0.5% better
+CHANGE_COURSE_THRESHOLD_USD = 25_000   # a different route must beat staying by this much all-in (hysteresis)
+TURN_PENALTY_H = 4.0               # time to bring the ship about and settle on the reverse heading (simulated)
+SAFEST_SWITCH_RISK_POINTS = 5.0    # "safest" objective: switch if the new route is this much less risky
 RISK_SCALE = 0.6                    # hours-weighted (geo + 0.5 wx) of 0.6 maps to risk index 100
 
 
@@ -72,6 +75,7 @@ class VoyageConfig:
     avoid: tuple = ()                             # chokepoint keys the operator refuses to transit
     port_delay_hours: float = 12.0                # baseline berth wait at the destination
     canal_delay_hours: float = 0.0                # extra queue at every canal on top of the modelled wait
+    change_course_threshold_usd: float = CHANGE_COURSE_THRESHOLD_USD   # all-in saving needed to leave the committed route
 
     def agent(self) -> RoutingAgent:
         owner = self.owner_key if self.owner_key in VESSEL_OWNERS[self.vessel_key] else VESSEL_OWNERS[self.vessel_key][0]
@@ -101,6 +105,7 @@ class Leg:
     note: str = ""
     entered: bool = False      # canal queue + toll already paid (leg starts mid-lane or was cut mid-transit)
     queued_h: float = 0.0      # part of the queue already waited (leg cut while the ship was queueing)
+    turn: bool = False         # starts with a U-turn: ``wait_h`` is the turn penalty, not a queue
 
     @property
     def hours(self) -> float:
@@ -159,6 +164,7 @@ class Voyage:
     blocked_remaining: list = field(default_factory=list)
     candidates: list = field(default_factory=list)
     decision: str = ""
+    recommendation: str = ""   # "stay" | "change_course" | "blocked" ("" before the first assessment)
     block_reason: str = ""
     timeline: list = field(default_factory=list)
     reroutes: int = 0
@@ -323,6 +329,29 @@ def _make_leg(ctx: Context, x: str, y: str, f0: float, f1: float, entered: bool,
                note=c.soft_block or "", entered=entered, queued_h=queued_h)
 
 
+def _turn_leg(ctx: Context, leg: Leg, extra_h: float = TURN_PENALTY_H) -> Leg:
+    """Make ``leg`` start with a U-turn: the ship waits ``extra_h`` more (the penalty, or what is left of it) where
+    it is (position stays on the lane) before sailing back, on top of any queue the leg already has. Idle fuel
+    during the manoeuvre is not modelled; the time cost is."""
+    return replace(leg, wait_h=leg.wait_h + extra_h, turn=True, note="turning around (U-turn penalty)",
+                   time_usd=leg.time_usd + extra_h * ctx.agent.delay_penalty_usd_per_hr)
+
+
+def _turn_weight(ctx: Context, pref: str) -> float:
+    """The U-turn's cost in the units of the active objective (hours / expenses / risk-free time)."""
+    h = TURN_PENALTY_H
+    e = h * ctx.agent.vessel.daily_asset_cost_usd / 24.0
+    if pref == "fastest":
+        return h
+    if pref == "cheapest":
+        return e
+    if pref == "safest":
+        return 1e-3 * h
+    wt, wc, _ = ctx.config.weights
+    mh, me, _ = ctx.means
+    return wt * h / mh + wc * e / me
+
+
 def _berth_leg(ctx: Context, node: str, hours: float, note: str) -> Leg:
     return Leg(x=node, y=node, f0=0.0, f1=0.0, nm=0.0, wait_h=hours, sea_h=0.0,
                time_usd=hours * ctx.agent.delay_penalty_usd_per_hr, kind="hold", note=note)
@@ -375,12 +404,22 @@ class Position:
     f: float = 0.0
 
 
+def arrival_lane(done: list, pos: Position) -> tuple[str, str] | None:
+    """(u, v) of the lane the ship just sailed when it is sitting at node v, else None. Leaving v back toward u is a
+    U-turn and pays the turn penalty (a ship part-way along a lane is handled in ``route_from`` itself)."""
+    if pos.node is None:
+        return None
+    last = next((l for l in reversed(done) if l.kind == "sail" and l.nm > 0), None)
+    return (last.x, last.y) if last is not None and last.y == pos.node else None
+
+
 def route_from(ctx: Context, pos: Position, dest: str, pref: str, via: str | None = None,
-               add_berth: bool = True) -> RouteSummary:
+               add_berth: bool = True, prev_lane: tuple[str, str] | None = None) -> RouteSummary:
     """Best route from ``pos`` to ``dest`` under ``pref``. Strict pass first (no storm-closed / over-premium lanes),
-    then a "forced through" pass that allows those; closures, draft limits and avoided chokepoints never relax."""
+    then a "forced through" pass that allows those; closures, draft limits and avoided chokepoints never relax.
+    ``prev_lane`` = the lane the ship arrived by (see ``arrival_lane``), so reversing out of a node costs a U-turn."""
     if via:
-        first = route_from(ctx, pos, via, pref, add_berth=False)
+        first = route_from(ctx, pos, via, pref, add_berth=False, prev_lane=prev_lane)
         if not first.feasible:
             return RouteSummary(label=pref, feasible=False, reason=first.reason)
         second = route_from(ctx, Position(node=via), dest, pref, add_berth=add_berth)
@@ -404,13 +443,22 @@ def route_from(ctx: Context, pos: Position, dest: str, pref: str, via: str | Non
             start = VIRTUAL
             c = ctx.costs[frozenset((pos.x, pos.y))]
             d = G.edges[pos.x, pos.y]
-            if not (c.hard_block or (c.soft_block and not relaxed)):
+            in_canal = d["mode"] == "canal"        # a transit in progress is completed, and nobody turns round in a canal
+            if in_canal or not (c.hard_block or (c.soft_block and not relaxed)):
                 H.add_edge(VIRTUAL, pos.y, w=_weight(ctx, c, d, pref, 1.0 - pos.f, with_entry=False))
-            back = replace(c, hard_block=None, soft_block=None)     # retreating along the lane is always allowed
-            H.add_edge(VIRTUAL, pos.x, w=_weight(ctx, back, d, pref, pos.f, with_entry=False))
+            if not in_canal:
+                back = replace(c, hard_block=None, soft_block=None)     # retreating along the lane is always allowed
+                H.add_edge(VIRTUAL, pos.x, w=_weight(ctx, back, d, pref, pos.f, with_entry=False)
+                           + _turn_weight(ctx, pref))
+                if H.has_edge(pos.y, pos.x):       # ...and "forward to y, then straight back" is the same U-turn
+                    H[pos.y][pos.x]["w"] += _turn_weight(ctx, pref)
         if start == dest:
             legs = [_berth_leg(ctx, dest, berth_hours(ctx, dest), "berth wait")] if add_berth else []
             return summarise(ctx, legs, pref)
+        reverses = (prev_lane is not None and pos.node is not None and pos.node == prev_lane[1]
+                    and H.has_edge(pos.node, prev_lane[0]))
+        if reverses:
+            H[pos.node][prev_lane[0]]["w"] += _turn_weight(ctx, pref)
         try:
             path = nx.dijkstra_path(H, start, dest, weight="w")
         except nx.NetworkXNoPath:
@@ -421,9 +469,14 @@ def route_from(ctx: Context, pos: Position, dest: str, pref: str, via: str | Non
                 if b == pos.y:
                     legs.append(_make_leg(ctx, pos.x, pos.y, pos.f, 1.0, entered=True))
                 else:                               # turning back: sail the lane y->x from (1-f) to 1
-                    legs.append(_make_leg(ctx, pos.y, pos.x, 1.0 - pos.f, 1.0, entered=True))
+                    legs.append(_turn_leg(ctx, _make_leg(ctx, pos.y, pos.x, 1.0 - pos.f, 1.0, entered=True)))
             else:
-                legs.append(_make_leg(ctx, a, b, 0.0, 1.0, entered=False))
+                leg = _make_leg(ctx, a, b, 0.0, 1.0, entered=False)
+                prev = legs[-1] if legs else None
+                if (reverses and a == pos.node and b == prev_lane[0] and not legs) or \
+                        (prev is not None and prev.kind == "sail" and (prev.x, prev.y) == (b, a)):
+                    leg = _turn_leg(ctx, leg)
+                legs.append(leg)
         if add_berth:
             legs.append(_berth_leg(ctx, dest, berth_hours(ctx, dest), "berth wait"))
         return summarise(ctx, legs, pref, forced=relaxed)
@@ -448,13 +501,16 @@ def reprice(ctx: Context, legs: list, label: str = "Hold course") -> RouteSummar
                 out.append(l)
             continue
         c = ctx.costs.get(frozenset((l.x, l.y)))
-        if c is None or c.hard_block:
+        mid_canal = bool(l.entered and c is not None and ctx.G.edges[l.x, l.y]["mode"] == "canal")   # transit completes
+        if c is None or (c.hard_block and not mid_canal):
             name = CHOKEPOINTS.get(ctx.G.edges[l.x, l.y]["chokepoint"]) if ctx.G.has_edge(l.x, l.y) else None
             why = c.hard_block if c else "closed"
             return RouteSummary(label=label, feasible=False,
                                 reason=f"{name or ctx.G.nodes[l.x]['name'] + ' - ' + ctx.G.nodes[l.y]['name']}: {why}")
         forced |= bool(c.soft_block)
-        out.append(_make_leg(ctx, l.x, l.y, l.f0, l.f1, entered=l.entered, queued_h=l.queued_h))
+        leg = _make_leg(ctx, l.x, l.y, l.f0, l.f1, entered=l.entered, queued_h=l.queued_h)
+        left = max(l.wait_h - leg.wait_h, 0.0) if l.turn else 0.0       # turn penalty still to serve
+        out.append(_turn_leg(ctx, leg, left) if left > 0 else leg)
     return summarise(ctx, out, label, forced)
 
 
@@ -514,8 +570,12 @@ def ship_state(v: Voyage, G: nx.Graph) -> ShipState:
     l = legs[i]
     traveled = sum(x.nm for x in legs[:i])
     if l.kind == "hold":
-        lat, lon = node_ll(G, l.x)
-        pos = Position(node=l.x)
+        if l.x != l.y and l.f0 > 0.0:                # held part-way along a lane (e.g. turning around)
+            lat, lon = point_on_lane(G, l.x, l.y, l.f0)
+            pos = Position(x=l.x, y=l.y, f=l.f0)
+        else:
+            lat, lon = node_ll(G, l.x)
+            pos = Position(node=l.x)
         frac_nm, sog, course = 0.0, 0.0, 0.0
         activity = "berth wait" if l.note == "berth wait" else "holding"
     elif into < l.wait_h:
@@ -523,7 +583,7 @@ def ship_state(v: Voyage, G: nx.Graph) -> ShipState:
         pos = Position(node=l.x) if l.f0 == 0.0 else Position(x=l.x, y=l.y, f=l.f0)
         frac_nm, sog = 0.0, 0.0
         course = bearing_deg(*node_ll(G, l.x), *node_ll(G, l.y))
-        activity = "canal queue"
+        activity = "turning around" if l.turn else "canal queue"
     else:
         p = (into - l.wait_h) / max(l.sea_h, 1e-9)
         f = l.f0 + (l.f1 - l.f0) * min(max(p, 0.0), 1.0)
@@ -567,9 +627,11 @@ def split_at(v: Voyage, G: nx.Graph) -> tuple[list, list, Position]:
         done.append(replace(l, wait_h=into, time_usd=l.time_usd * into / max(l.hours, 1e-9)))
         ahead.insert(0, replace(l, wait_h=l.hours - into, time_usd=l.time_usd * (1 - into / max(l.hours, 1e-9))))
         return done, ahead, Position(node=l.x)
-    if into < l.wait_h:                              # in a canal queue: queued time is spent, transit still ahead
-        done.append(Leg(x=l.x, y=l.x, f0=0.0, f1=0.0, nm=0.0, wait_h=into, sea_h=0.0,
-                        time_usd=l.time_usd * into / max(l.hours, 1e-9), kind="hold", note="canal queue"))
+    if into < l.wait_h:                              # in a canal queue (or a U-turn): the wait is spent, sailing still ahead
+        at_node = l.f0 == 0.0                        # a mid-lane wait keeps the ship's lane position
+        done.append(Leg(x=l.x, y=l.x if at_node else l.y, f0=l.f0, f1=l.f0, nm=0.0, wait_h=into, sea_h=0.0,
+                        time_usd=l.time_usd * into / max(l.hours, 1e-9), kind="hold",
+                        note=l.note if l.turn else "canal queue"))
         ahead.insert(0, replace(l, wait_h=l.wait_h - into, queued_h=l.queued_h + into,
                                 time_usd=l.time_usd * (1 - into / max(l.hours, 1e-9))))
         return done, ahead, Position(node=l.x) if l.f0 == 0.0 else Position(x=l.x, y=l.y, f=l.f0)
@@ -693,17 +755,20 @@ def reevaluate(v: Voyage, settings: dict, model=None, cause: str = "", force: bo
         return msg
 
     done, ahead, pos = split_at(v, G)
+    prev_lane = arrival_lane(done, pos)
     was_blocked = v.status == "blocked"
     changed, closed = _changed_lanes(old_ctx, ctx, ahead) if ahead else ([], [])
     improved = _improved_lanes(old_ctx, ctx)
     hold = reprice(ctx, ahead) if ahead else RouteSummary("Hold course", False, reason="No remaining route.")
-    affected = bool(changed or closed or improved) or was_blocked or force or via is not None
+    objective_changed = prev_config is not None and prev_config.preference != cfg.preference
+    affected = bool(changed or closed or improved) or was_blocked or force or via is not None or objective_changed
 
     if not affected:
         events = ", ".join(describe(new_settings)) or "no active disruptions"
-        msg = (f"Remaining route NOT affected ({hold.corridor}); no reroute needed. "
+        msg = (f"STAY ON COURSE. Remaining route NOT affected ({hold.corridor}); no reroute needed. "
                f"Active scenarios: {events}.")
         v.candidates = [Candidate("Hold course", hold, chosen=True)]
+        v.recommendation = "stay"
         v.decision = msg
         log(v, "assessment", cause or "Scenario assessed", msg, source)
         return msg
@@ -712,7 +777,7 @@ def reevaluate(v: Voyage, settings: dict, model=None, cause: str = "", force: bo
     if hold.feasible:
         cands.append(Candidate("Hold course", hold))
     for pref in PREFERENCES:
-        s = route_from(ctx, pos, cfg.destination, pref, via=via)
+        s = route_from(ctx, pos, cfg.destination, pref, via=via, prev_lane=prev_lane)
         s.label = PREFERENCES[pref] + (f" via {G.nodes[via]['name']}" if via else "")
         if s.feasible and not any(_same(s, c.summary) for c in cands):
             cands.append(Candidate(s.label, s))
@@ -724,13 +789,14 @@ def reevaluate(v: Voyage, settings: dict, model=None, cause: str = "", force: bo
     name = lambda n: G.nodes[n]["name"]
 
     if not feasible:
-        reason = route_from(ctx, pos, cfg.destination, cfg.preference).reason
+        reason = route_from(ctx, pos, cfg.destination, cfg.preference, prev_lane=prev_lane).reason
         v.legs = done
         v.t = sum(l.hours for l in done)
         v.blocked_remaining = legs_polyline(G, ahead)
         v.status = "blocked"
         v.block_reason = reason
         v.candidates = []
+        v.recommendation = "blocked"
         v.decision = f"VOYAGE BLOCKED. {reason}"
         log(v, "blocked", cause or "Voyage blocked", v.decision, source)
         return v.decision
@@ -740,9 +806,10 @@ def reevaluate(v: Voyage, settings: dict, model=None, cause: str = "", force: bo
     else:
         pool = feasible
     best = min(pool, key=lambda c: score(ctx, c.summary, cfg.preference))
-    if via is None and hold.feasible and best.name != "Hold course" and \
-            score(ctx, hold, cfg.preference) <= score(ctx, best.summary, cfg.preference) * (1 + REROUTE_TOLERANCE):
-        best = cands[0]
+    rejected = None          # a route the objective prefers that still does not beat staying by the threshold
+    if not (force or objective_changed) and via is None and hold.feasible and best.name != "Hold course" \
+            and not _worth_changing(ctx, hold, best.summary):
+        rejected, best = best, cands[0]
     best.chosen = True
     v.candidates = cands
 
@@ -761,10 +828,16 @@ def reevaluate(v: Voyage, settings: dict, model=None, cause: str = "", force: bo
             lead = f"Conditions improved elsewhere ({', '.join(improved[:2])}); alternatives re-checked: "
         else:
             lead = "The remaining route does not use the affected lanes; alternatives re-checked: "
-        msg = (lead + f"holding course is still the best {PREFERENCES[cfg.preference].lower()} option. "
+        msg = ("STAY ON COURSE. " + lead
+               + f"holding course is still the best {PREFERENCES[cfg.preference].lower()} option. "
                f"Remaining: {hold.nm:,.0f} nm, {hold.hours / 24:.1f} d, est. ${hold.total_usd / 1e6:,.2f}M, "
                f"risk {hold.risk_index:.0f}/100.")
+        if rejected is not None:
+            alt = rejected.summary
+            msg += (f" A different route ({alt.corridor}) scores slightly better but does not beat staying by the "
+                    f"${cfg.change_course_threshold_usd:,.0f} change-course threshold.")
         v.legs = done + hold.legs
+        v.recommendation = "stay"
         v.decision = msg
         log(v, "assessment", cause or "Route re-assessed", msg, source)
         return msg
@@ -774,20 +847,66 @@ def reevaluate(v: Voyage, settings: dict, model=None, cause: str = "", force: bo
     v.legs = done + new.legs
     v.reroutes += 1
     why = explain_choice(ctx, best, cands)
-    turn = ""
-    if new.legs and pos.node is None and new.legs[0].x == pos.y:
-        turn = " The ship turns back along its current lane."
+    turning = bool(new.legs and new.legs[0].turn)
     where = name(pos.node) if pos.node else f"its position near {name(pos.x)}"
-    msg = (f"REROUTED from {where} ({ship_state(v, G).lat:.2f}, {ship_state(v, G).lon:.2f}) via {new.corridor}: "
-           f"{new.nm:,.0f} nm remaining, {new.hours / 24:.1f} d, est. ${new.total_usd / 1e6:,.2f}M, "
-           f"risk {new.risk_index:.0f}/100.{turn} {why}")
+    headline = _change_headline(G, pos, new, hold if hold.feasible else None)
+    turn_note = f" The ship turns around (+{TURN_PENALTY_H:g} h)." if turning else ""
+    msg = (headline + f"REROUTED from {where} ({ship_state(v, G).lat:.2f}, {ship_state(v, G).lon:.2f}) "
+           f"via {new.corridor}: {new.nm:,.0f} nm remaining, {new.hours / 24:.1f} d, est. "
+           f"${new.total_usd / 1e6:,.2f}M, risk {new.risk_index:.0f}/100.{turn_note} {why}")
     if closed:
         msg = f"Remaining route closed at {', '.join(closed[:2])}. " + msg
     elif improved and not changed:
         msg = f"Conditions improved ({', '.join(improved[:2])}). " + msg
+    v.recommendation = "change_course"
     v.decision = msg
     log(v, "reroute", cause or "Rerouted", msg, source)
     return msg
+
+
+def _worth_changing(ctx: Context, hold: RouteSummary, alt: RouteSummary) -> bool:
+    """Hysteresis: leave the committed route only if the alternative beats it by ``change_course_threshold_usd`` in
+    the terms of the active objective (sunk costs excluded, since only remaining legs are compared):
+    fastest = hours saved x the cost of a delayed hour; cheapest = expenses (no lateness penalty); balanced and
+    safest = all-in cost incl. time. 'Safest' also switches on a clear risk reduction."""
+    cfg = ctx.config
+    if cfg.preference == "fastest":
+        gain = (hold.hours - alt.hours) * ctx.agent.delay_penalty_usd_per_hr
+    elif cfg.preference == "cheapest":
+        gain = (hold.total_usd - hold.time_usd) - (alt.total_usd - alt.time_usd)
+    else:
+        gain = hold.total_usd - alt.total_usd
+    if gain >= cfg.change_course_threshold_usd:
+        return True
+    return cfg.preference == "safest" and hold.risk_index - alt.risk_index >= SAFEST_SWITCH_RISK_POINTS
+
+
+def _change_headline(G: nx.Graph, pos: Position, new: RouteSummary, hold: RouteSummary | None) -> str:
+    """"CHANGE COURSE NOW: turning north from off X, saves 9.1 d and $1.4M vs continuing via Y." One line, so a
+    reader sees the decision and the reason before the detail. ``hold`` is None when staying is no longer possible."""
+    name = lambda n: G.nodes[n]["name"]
+    turning = bool(new.legs and new.legs[0].turn)
+    off = name(pos.node) if pos.node else name(pos.x if pos.f < 0.5 else pos.y)
+    place = off[0].lower() + off[1:] if off.startswith("Off ") else f"off {off}"
+    first = next((l for l in new.legs if l.kind == "sail"), None)
+    if turning and first:
+        heading = _compass(bearing_deg(*node_ll(G, first.x), *node_ll(G, first.y)))
+        action = f"turning {heading} from {place}"
+    else:
+        action = f"changing course toward {name(first.y)}" if first else "changing course"
+    if hold is None:
+        gain, verdict = "is the only way on", "because the committed route is no longer possible"
+    else:
+        dd, dc = (hold.hours - new.hours) / 24, (hold.total_usd - new.total_usd) / 1e6
+        gain = (f"saves {dd:.1f} d and ${dc:.2f}M" if dd >= 0 and dc >= 0
+                else f"changes the voyage by {-dd:+.1f} d and {-dc:+.2f}M USD")
+        verdict = f"vs continuing via {hold.corridor}"
+    return f"CHANGE COURSE NOW: {action}, {gain} {verdict}. "
+
+
+def _compass(deg: float) -> str:
+    return ("north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west")[
+        int(((deg % 360) + 22.5) // 45) % 8]
 
 
 def _same(a: RouteSummary, b: RouteSummary) -> bool:
