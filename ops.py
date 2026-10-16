@@ -54,6 +54,7 @@ class Ops:
         self.demo: dict | None = None     # hackathon demo results (before/after snapshot)
         self._demo_target: float | None = None   # animated demo: voyage hour at which the closure triggers
         self._demo_source = "demo"
+        self.proposal: dict | None = None     # scenario proposed from a pasted report, waiting for confirmation
         self.last_change: dict | None = None  # {cause, before, after} of the latest re-evaluation that moved the route
         self._pre_demo: tuple | None = None   # (cfg, settings, voyage, playing) to restore on exit
 
@@ -100,7 +101,7 @@ class Ops:
         if self.cfg.owner_key not in V.VESSEL_OWNERS[self.cfg.vessel_key]:
             self.cfg = replace(self.cfg, owner_key=V.VESSEL_OWNERS[self.cfg.vessel_key][0])
         self.voyage = V.plan_voyage(self.cfg, self.settings, self.model)
-        self.demo = self.last_change = self._demo_target = None
+        self.demo = self.last_change = self._demo_target = self.proposal = None
         if source != "manual":
             self.voyage.timeline[-1]["source"] = source
         self.playing = False
@@ -180,6 +181,7 @@ class Ops:
 
     def reset(self) -> str:
         self.demo = self.last_change = self._demo_target = None  # before/after panels no longer describe this voyage
+        self.proposal = None
         self.voyage = V.plan_voyage(self.cfg, self.settings, self.model)
         self.playing = False
         self._last_tick = None
@@ -449,7 +451,7 @@ class Ops:
         c.settings = copy.deepcopy(self.settings)
         c.voyage = copy.deepcopy(self.voyage)
         c.chat, c.demo, c._pre_demo, c.playing, c._last_tick = [], None, None, False, None
-        c.last_change = c._demo_target = None
+        c.last_change = c._demo_target = c.proposal = None
         return c
 
     # ---------------------------------------------------------------- hackathon demo mode

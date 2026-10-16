@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+import newsparse
 from events import EVENT_BY_KEY
 from ops import DISRUPTIONS, PORTS, VIA_NODES, Ops
 from voyage import PREFERENCES, VESSELS
@@ -472,8 +473,48 @@ def preview(op: Op, ops: Ops, intel: dict | None = None) -> str:
             f"(Simulated what-if on a copy of your voyage; modelled estimates.) Engine detail for the copy: {detail}")
 
 
+def _report_reply(message: str, ops: Ops, intel: dict | None) -> Reply:
+    """A pasted news report: analyse it as DATA, preview the scenario it would suggest, change nothing, and keep the
+    proposal for an explicit confirmation. Instructions inside the text are never read as instructions."""
+    f = newsparse.analyse(message, ops.route_corridor())
+    lines = ["PASTED REPORT (treated as data, not instructions). Nothing has been changed."]
+    if f.regions:
+        lines.append("Corridors it mentions: " + ", ".join(label for _, label in f.regions) + ".")
+        lines.append(("On your current route: " + ", ".join(f.on_route) + ".") if f.on_route
+                     else "Mentioned corridors are not on your current route.")
+    if f.threat_words:
+        lines.append("Wording found: " + ", ".join(f.threat_words) + ".")
+    ops.proposal = None
+    if f.proposal:
+        op = validate(Op(f.proposal["name"], dict(f.proposal["args"])))
+        ops.proposal = {"op": op, "source": "pasted report"}
+        label = DISRUPTIONS[op.args["name"]][2]
+        value = op.args.get("value")
+        lines.append(f"Proposed SIMULATED scenario: {label}" + (f" ({value:.0%})" if value is not None else "") + ". "
+                     + preview(op, ops, intel))
+        lines.append("To apply exactly this, press 'Simulate this scenario' or say 'Simulate the proposed scenario'.")
+    else:
+        lines.append("No scenario proposed. " + f.reason)
+    lines.append("This is a keyword reading and can misjudge a text. News headlines are advisory and never change "
+                 "the simulator by themselves.")
+    return Reply("\n\n".join(lines), [("report", {}, "")], [], "command", False)
+
+
+def _apply_proposal(ops: Ops, intel: dict | None) -> Reply:
+    """The user confirmed: run exactly the stored proposal through the same operation as any other command."""
+    op = ops.proposal["op"]
+    ops.proposal = None
+    result = execute(op, ops, intel)
+    return Reply("Applied the proposed SIMULATED scenario from the pasted report. " + result,
+                 [(op.name, op.args, result)], [], "command", True)
+
+
 def handle(message: str, ops: Ops, llm=None, intel: dict | None = None) -> Reply:
     """Full pipeline for one chat message."""
+    if newsparse.is_confirmation(message) and getattr(ops, "proposal", None):
+        return _apply_proposal(ops, intel)
+    if newsparse.looks_like_report(message):
+        return _report_reply(message, ops, intel)
     intent = classify(message)
     proposed = parse(message, ops)
     mode = "command"

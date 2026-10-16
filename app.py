@@ -310,7 +310,8 @@ def render_ui() -> None:
                 if not ops.chat:
                     st.markdown(md("Give me instructions (\"Close Suez and reroute my ship\") or ask questions "
                                    "(\"What if Suez closes?\"). Questions and what-ifs never change the voyage; "
-                                   "what-ifs run on a copy and are labelled PREVIEW."))
+                                   "what-ifs run on a copy and are labelled PREVIEW. Paste a news report (start a short "
+                                   "one with \"News:\") and I read it as data and only propose a scenario."))
                 for m in ops.chat[-40:]:
                     with st.chat_message(m["role"], avatar="🧭" if m["role"] == "assistant" else "👤"):
                         if m["role"] == "assistant":
@@ -321,6 +322,11 @@ def render_ui() -> None:
                         st.markdown(md(m["content"]))
                         if m.get("rejected"):
                             st.caption("Rejected (failed validation): " + "; ".join(m["rejected"]))
+            if getattr(ops, "proposal", None):
+                st.button("Simulate this scenario", key="btn_sim_proposal", type="primary", width="stretch",
+                          on_click=on_chat, args=("Simulate the proposed scenario",),
+                          help="Applies exactly the scenario proposed from your pasted report. Nothing changes until "
+                               "you press this.")
             examples = [("Close Suez + reroute", "Close Suez and reroute my ship"),
                         ("What if Suez closes?", "What if the Suez Canal closes?"),
                         ("Advance 5 days", "Advance the voyage by 5 days"),
