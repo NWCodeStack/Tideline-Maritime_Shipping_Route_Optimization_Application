@@ -110,6 +110,9 @@ div[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:10px}
 .demo-table{width:100%;border-collapse:collapse;font-size:13px;color:#c9dfeb}
 .demo-table th{text-align:left;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:#9ab3c4;padding:5px 8px;border-bottom:1px solid #21374b}
 .demo-table td{padding:5px 8px;border-bottom:1px solid #1b3245;font-variant-numeric:tabular-nums}
+.demo-table td.basis{font-size:11.5px;color:#8ba5b8;font-variant-numeric:normal}
+.demo-table tr.tot td{border-top:1px solid #2a5668;color:#e8f3fa}
+.demo-table tr.weight td{color:#b7a7e6}
 .tag-sim{font-size:11px;font-weight:800;letter-spacing:.06em;color:#ffd8a8;border:1px solid #7c5640;border-radius:4px;padding:0 5px}
 .tag-live{font-size:11px;font-weight:800;letter-spacing:.06em;color:#72f0d5;border:1px solid #2c8b7b;border-radius:4px;padding:0 5px}
 @media(max-width:700px){.topbar{margin-bottom:6px}.brand{font-size:17px}.metric-value{font-size:22px}}
@@ -232,6 +235,22 @@ def decision(text: str, blocked: bool = False, rec: str = "") -> str:
     """Decision card; ``rec`` ("stay" | "change_course") tints it so the recommendation reads at a glance."""
     kind = " blocked" if blocked else {"stay": " stay", "change_course": " change"}.get(rec, "")
     return f'<div class="decision{kind}">{html.escape(text)}</div>'
+
+
+def cost_breakdown(lines: list[dict], co2_t: float) -> str:
+    """Every cost factor on its own line with the basis of its data. The cash lines add up to the projected cost;
+    the carbon shadow price is a decision weight, so it sits below the total and is not added to it."""
+    esc = html.escape
+    cash = [l for l in lines if l["cash"]]
+    rows = "".join(f'<tr><td>{esc(l["label"])}</td><td>{_usd(l["usd"])}</td><td class="basis">{esc(l["basis"])}</td></tr>'
+                   for l in cash)
+    rows += (f'<tr class="tot"><td><b>Cash total (projected cost)</b></td><td><b>{_usd(sum(l["usd"] for l in cash))}</b>'
+             f'</td><td class="basis">sum of the lines above</td></tr>')
+    rows += "".join(f'<tr class="weight"><td>{esc(l["label"])}</td><td>{_usd(l["usd"])}</td>'
+                    f'<td class="basis">{esc(l["basis"])}</td></tr>' for l in lines if not l["cash"])
+    return (f'<table class="demo-table"><tr><th>Factor</th><th>Whole voyage</th><th>Basis</th></tr>{rows}</table>'
+            f'<div class="intel-meta" style="margin-top:6px">CO2 emitted: {co2_t:,.0f} t (fuel x 3.114). '
+            f'All values are SIMULATED or ESTIMATED.</div>')
 
 
 def panel_head(title: str, label: str = "") -> str:

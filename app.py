@@ -91,6 +91,7 @@ def render_ui() -> None:
 
     import copilot
     import intel
+    import economics as ECO
     import ui
     import voyage as V
     from agents import CARGO_OWNERS, VESSELS, make_agent, profile_matrix
@@ -160,6 +161,13 @@ def render_ui() -> None:
         ss["cfg_speed"] = float(min(max(c.cruise_speed_kn or VESSELS[c.vessel_key].speed_options_kn[1], lo), hi))
         ss["cfg_fuel"] = float(c.fuel_price)
         ss["cfg_pref"] = c.preference
+        e = c.econ
+        ss["cfg_preset"] = ECO.preset_key(c.preference, e)
+        ss["cfg_tvm"], ss["cfg_carbon"] = float(e.time_value_mult), float(e.carbon_usd_per_t)
+        ss["cfg_ets_on"], ss["cfg_eua"], ss["cfg_etsc"] = e.ets_enabled, float(e.eua_usd_per_t), float(e.ets_coverage_pct)
+        ss["cfg_fuelmode"] = e.fuel_price_mode
+        ss["cfg_fuel_ovr"] = float(dict(e.fuel_overrides).get(c.origin, ECO.effective_fuel_price(
+            c.fuel_price, c.origin, ECO.Economics(fuel_price_mode="origin_port"))))
         ss["cfg_w_time"], ss["cfg_w_cost"], ss["cfg_w_risk"] = (float(w) for w in c.weights)
         ss["cfg_avoid"] = list(c.avoid)
         ss["cfg_port_delay"], ss["cfg_canal_delay"] = float(c.port_delay_hours), float(c.canal_delay_hours)
@@ -199,6 +207,20 @@ def render_ui() -> None:
             "departure": datetime.combine(ss["cfg_dep_date"], ss["cfg_dep_time"], tzinfo=timezone.utc),
         }[field]
         flash(ops.update_config(**{field: val}))
+
+    def on_preset() -> None:
+        if ss["cfg_preset"] in ECO.PRESETS:          # "custom" is a read-out of moved sliders, not a choice
+            flash(ops.apply_preset(ss["cfg_preset"]))
+
+    def on_econ(field: str) -> None:
+        if field == "fuel_overrides":
+            others = tuple((p, x) for p, x in ops.cfg.econ.fuel_overrides if p != ops.cfg.origin)
+            val = others + ((ops.cfg.origin, float(ss["cfg_fuel_ovr"])),)
+        else:
+            val = {"time_value_mult": float(ss["cfg_tvm"]), "carbon_usd_per_t": float(ss["cfg_carbon"]),
+                   "ets_enabled": bool(ss["cfg_ets_on"]), "eua_usd_per_t": float(ss["cfg_eua"]),
+                   "ets_coverage_pct": float(ss["cfg_etsc"]), "fuel_price_mode": ss["cfg_fuelmode"]}[field]
+        flash(ops.set_economics(**{field: val}))
 
     def on_incident(key: str) -> None:
         flash(ops.set_event(key, ss[f"inc_{key}"]))
@@ -276,6 +298,30 @@ def render_ui() -> None:
                                                15.0, 1.5)[0])
             st.caption(md(f"Model estimate at {spd:g} kn, calm sea: **{tpd:,.0f} t/day** "
                           f"(≈ ${tpd * ops.cfg.fuel_price / 1e3:,.0f}k/day)."))
+        with st.expander("Presets & economics", expanded=False):
+            st.radio("Preset", [*ECO.PRESETS, "custom"], key="cfg_preset", horizontal=True, on_change=on_preset,
+                     format_func=lambda k: ECO.PRESETS[k].label if k in ECO.PRESETS else "Custom",
+                     help=" · ".join(f"{p.label}: {p.blurb}" for p in ECO.PRESETS.values())
+                     + " Moving a slider below switches to Custom.")
+            st.slider("Value of time (x)", 1.0, 10.0, step=0.5, key="cfg_tvm", on_change=on_econ,
+                      args=("time_value_mult",),
+                      help="A delayed hour counts this many times its cash cost in the speed and route decision.")
+            st.slider("Carbon price ($/t CO2)", 0.0, 1000.0, step=10.0, key="cfg_carbon", on_change=on_econ,
+                      args=("carbon_usd_per_t",),
+                      help="Decision weight only: it slows the ship and favours cleaner routes but is never added to cash cost.")
+            st.toggle("EU ETS (voyages calling at an EU port)", key="cfg_ets_on", on_change=on_econ, args=("ets_enabled",))
+            e1, e2 = st.columns(2)
+            e1.number_input("Allowance ($/t)", 0.0, 400.0, step=5.0, key="cfg_eua", on_change=on_econ,
+                            args=("eua_usd_per_t",), disabled=not ops.cfg.econ.ets_enabled)
+            e2.number_input("Coverage (%)", 0.0, 100.0, step=10.0, key="cfg_etsc", on_change=on_econ,
+                            args=("ets_coverage_pct",), disabled=not ops.cfg.econ.ets_enabled)
+            st.radio("Fuel price source", ["global", "origin_port"], key="cfg_fuelmode", horizontal=True,
+                     on_change=on_econ, args=("fuel_price_mode",),
+                     format_func=lambda k: "Fuel-price setting" if k == "global" else "Departure port (sample)")
+            st.number_input(f"Bunker price at {ports[ops.cfg.origin]} ($/t, override)", 100.0, 3000.0, step=10.0,
+                            key="cfg_fuel_ovr", on_change=on_econ, args=("fuel_overrides",),
+                            disabled=ops.cfg.econ.fuel_price_mode != "origin_port",
+                            help="SAMPLE price table unless you override it here.")
         with st.expander("Route optimisation", expanded=False):
             st.radio("Objective", list(V.PREFERENCES), key="cfg_pref", horizontal=True,
                      format_func=V.PREFERENCES.get, on_change=on_cfg, args=("preference",),
@@ -491,6 +537,10 @@ def render_ui() -> None:
                 st.markdown(ui.decision(v.block_reason, True), unsafe_allow_html=True)
             elif v.decision:
                 st.markdown(ui.decision(v.decision, rec=v.recommendation), unsafe_allow_html=True)
+            with st.expander("Cost breakdown · every factor, with its data basis", expanded=False):
+                whole = V.summarise(V.build_context(ops.cfg, ops.settings, model), v.legs)
+                st.markdown(ui.cost_breakdown(ECO.breakdown(whole, ops.cfg.econ), whole.co2_t),
+                            unsafe_allow_html=True)
             opts = v.candidates if v.candidates else ops.options()
             if opts:
                 rows = []

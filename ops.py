@@ -16,6 +16,7 @@ from dataclasses import replace
 
 import voyage as V
 from data_engine import CHOKEPOINTS, NODE_DEFS
+from economics import PRESETS, apply_preset
 from events import EVENT_BY_KEY, STORM_AVOID_WAVE_M, default_settings, describe
 
 PORTS = {k: v[0] for k, v in NODE_DEFS.items() if v[3] == "port"}
@@ -132,6 +133,23 @@ class Ops:
                            prev_config=prev, source=source)
         self._touch()
         return msg
+
+    def set_economics(self, source: str = "manual", **changes) -> str:
+        """Change the economic assumptions (carbon price, value of time, EU ETS, per-port fuel). Moving any of these
+        off a preset makes the objective read "Custom"; underway, the rest of the voyage is re-optimised."""
+        try:
+            econ = replace(self.cfg.econ, **changes)
+        except TypeError:
+            return f"Unknown economics setting: {', '.join(sorted(changes))}."
+        return self.update_config(source=source, econ=econ)
+
+    def apply_preset(self, key: str, source: str = "manual") -> str:
+        """Select an objective preset: it sets the routing objective, the value-of-time multiplier and the carbon price."""
+        if key not in PRESETS:
+            return f"Unknown preset '{key}'. Available: {', '.join(p.label for p in PRESETS.values())}."
+        preference, changes = apply_preset(key)
+        msg = self.update_config(source=source, preference=preference, econ=replace(self.cfg.econ, **changes))
+        return f"Preset {PRESETS[key].label} applied ({PRESETS[key].blurb}) " + msg
 
     # ---------------------------------------------------------------- playback
     def start(self) -> str:

@@ -34,6 +34,7 @@ import pandas as pd
 from agents import RoutingAgent, premium_multiple
 from events import stress_edge
 from data_engine import CHOKEPOINTS, WEATHER_BLOCK_THRESHOLD, haversine_nm
+from economics import CO2_PER_T_FUEL, ECA_FUEL_PREMIUM_USD_PER_T, eca_fraction
 import sklearn
 
 from ml_models import FEATURES, MODEL_PATH, FuelModel, true_fuel_tonnes_per_day
@@ -127,10 +128,15 @@ class EdgeCost:
     objective: float
     hard_block: str | None = None        # never relaxed
     soft_block: str | None = None        # relaxed in the "forced through" pass
+    co2_t: float = 0.0                   # fuel_t x 3.114
+    eca_usd: float = 0.0                 # low-sulphur fuel premium for the share of the lane inside an ECA (cash)
+    ets_usd: float = 0.0                 # EU ETS allowances for this lane's CO2 (cash)
+    carbon_usd: float = 0.0              # carbon shadow price x CO2 (decision weight, NOT cash)
 
     @property
     def total_usd(self) -> float:
-        return self.fuel_usd + self.toll_usd + self.war_usd + self.time_usd
+        """Cash cost of the lane (the carbon shadow price is excluded on purpose)."""
+        return self.fuel_usd + self.toll_usd + self.war_usd + self.time_usd + self.eca_usd + self.ets_usd
 
 
 @dataclass
@@ -177,13 +183,19 @@ class Comparison:
     rerouted: bool
 
 
-def price_edge_batch(items, agent: RoutingAgent, fuel_price: float, model: FuelModel | None = None
-                     ) -> dict[frozenset, EdgeCost]:
+def price_edge_batch(items, agent: RoutingAgent, fuel_price: float, model: FuelModel | None = None,
+                     econ=None, ets_active: bool = False) -> dict[frozenset, EdgeCost]:
     """Price lanes for one agent. ``items`` is an iterable of (u, v, edge_data); one ML call per speed option.
 
     objective = fuel_t * fuel_price + toll_weight * toll + geopolitical_risk * insurance_sensitivity * days
-                + hours * delay_penalty
+                + hours * delay_penalty * time_value_mult + ECA fuel switch + EU ETS + carbon_price * CO2
+
+    ``econ`` (economics.Economics) switches on the factors after the first four; without it the lane is priced
+    exactly as before (the stress-test tab). The speed of each lane is the option with the lowest objective.
     """
+    tvm = econ.time_value_mult if econ else 1.0
+    carbon_price = econ.carbon_usd_per_t if econ else 0.0
+    ets_rate = econ.eua_usd_per_t * econ.ets_coverage_pct / 100.0 if (econ and ets_active) else 0.0
     edges = list(items)
     sea = [(u, v, d) for u, v, d in edges if d["mode"] != "overland"]
     out: dict[frozenset, EdgeCost] = {}
@@ -198,6 +210,8 @@ def price_edge_batch(items, agent: RoutingAgent, fuel_price: float, model: FuelM
                          for *_, d in sea])
         wind, wave = sea_state(wx)
         slow = 1.0 - SPEED_LOSS_WEATHER * wx ** 2
+        eca = (np.array([eca_fraction(d["sample_lat"], d["sample_lon"]) for *_, d in sea]) if econ
+               else np.zeros(len(sea)))
 
         best = None
         for speed in agent.speed_options_kn:
@@ -209,8 +223,13 @@ def price_edge_batch(items, agent: RoutingAgent, fuel_price: float, model: FuelM
             fuel_usd = fuel_t * fuel_price
             war = geo * agent.insurance_sensitivity_usd * hours / 24.0
             time_usd = hours * agent.delay_penalty_usd_per_hr
-            obj = fuel_usd + agent.toll_weight * toll + war + time_usd
-            cur = dict(stw=stw, hours=hours, fuel_t=fuel_t, fuel_usd=fuel_usd, war=war, time=time_usd, obj=obj)
+            co2 = fuel_t * CO2_PER_T_FUEL
+            eca_usd = fuel_t * eca * ECA_FUEL_PREMIUM_USD_PER_T
+            ets_usd = co2 * ets_rate
+            carbon_usd = co2 * carbon_price
+            obj = fuel_usd + agent.toll_weight * toll + war + time_usd * tvm + eca_usd + ets_usd + carbon_usd
+            cur = dict(stw=stw, hours=hours, fuel_t=fuel_t, fuel_usd=fuel_usd, war=war, time=time_usd, obj=obj,
+                       co2=co2, eca=eca_usd, ets=ets_usd, carbon=carbon_usd)
             if best is None:
                 best = cur
             else:
@@ -232,7 +251,9 @@ def price_edge_batch(items, agent: RoutingAgent, fuel_price: float, model: FuelM
             out[frozenset((u, v))] = EdgeCost(
                 u, v, d["mode"], float(nm[i]), float(best["hours"][i]), float(best["stw"][i]),
                 float(best["fuel_t"][i]), float(best["fuel_usd"][i]), float(toll[i]), float(best["war"][i]),
-                float(best["time"][i]), float(best["obj"][i]), hard, soft)
+                float(best["time"][i]), float(best["obj"][i]), hard, soft,
+                co2_t=float(best["co2"][i]), eca_usd=float(best["eca"][i]), ets_usd=float(best["ets"][i]),
+                carbon_usd=float(best["carbon"][i]))
 
     for u, v, d in edges:
         if d["mode"] != "overland":

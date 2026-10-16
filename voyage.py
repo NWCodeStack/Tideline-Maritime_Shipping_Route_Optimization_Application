@@ -33,6 +33,7 @@ import networkx as nx
 
 from agents import CARGO_OWNERS, VESSEL_OWNERS, VESSELS, RoutingAgent, make_agent, premium_multiple
 from data_engine import CHOKEPOINTS, build_maritime_graph, haversine_nm
+from economics import Economics, effective_fuel_price, ets_applies
 from events import apply_events, describe, normalise
 from routing_engine import DEFAULT_FUEL_PRICE_USD_PER_T, FUEL_MODEL, EdgeCost, price_edge_batch
 
@@ -76,6 +77,7 @@ class VoyageConfig:
     port_delay_hours: float = 12.0                # baseline berth wait at the destination
     canal_delay_hours: float = 0.0                # extra queue at every canal on top of the modelled wait
     change_course_threshold_usd: float = CHANGE_COURSE_THRESHOLD_USD   # all-in saving needed to leave the committed route
+    econ: Economics = field(default_factory=Economics)   # ECA / EU ETS / carbon / value-of-time / per-port fuel
 
     def agent(self) -> RoutingAgent:
         owner = self.owner_key if self.owner_key in VESSEL_OWNERS[self.vessel_key] else VESSEL_OWNERS[self.vessel_key][0]
@@ -106,6 +108,11 @@ class Leg:
     entered: bool = False      # canal queue + toll already paid (leg starts mid-lane or was cut mid-transit)
     queued_h: float = 0.0      # part of the queue already waited (leg cut while the ship was queueing)
     turn: bool = False         # starts with a U-turn: ``wait_h`` is the turn penalty, not a queue
+    eca_usd: float = 0.0       # low-sulphur fuel premium inside emission control areas (cash)
+    ets_usd: float = 0.0       # EU ETS allowances (cash)
+    co2_t: float = 0.0
+    carbon_usd: float = 0.0    # carbon shadow price x CO2: a decision weight, NOT cash
+    speed_kn: float = 0.0      # speed through the water the optimiser chose for this lane
 
     @property
     def hours(self) -> float:
@@ -113,7 +120,7 @@ class Leg:
 
     @property
     def total_usd(self) -> float:
-        return self.fuel_usd + self.toll_usd + self.war_usd + self.time_usd
+        return self.fuel_usd + self.toll_usd + self.war_usd + self.time_usd + self.eca_usd + self.ets_usd
 
 
 @dataclass
@@ -133,10 +140,15 @@ class RouteSummary:
     chokepoints: list = field(default_factory=list)
     forced: bool = False
     reason: str = ""
+    eca_usd: float = 0.0
+    ets_usd: float = 0.0
+    co2_t: float = 0.0
+    carbon_usd: float = 0.0
 
     @property
     def total_usd(self) -> float:
-        return self.fuel_usd + self.toll_usd + self.war_usd + self.time_usd
+        """Cash cost (the carbon shadow price is a decision weight and is not included)."""
+        return self.fuel_usd + self.toll_usd + self.war_usd + self.time_usd + self.eca_usd + self.ets_usd
 
     @property
     def corridor(self) -> str:
@@ -199,8 +211,12 @@ def base_graph() -> nx.Graph:
 
 def _econ_key(cfg: VoyageConfig, settings: dict) -> str:
     s = normalise(settings)
+    e = cfg.econ
     return json.dumps({"s": s, "v": cfg.vessel_key, "o": cfg.owner_key, "spd": cfg.cruise_speed_kn,
-                       "fp": round(cfg.fuel_price, 2), "av": sorted(cfg.avoid), "cd": cfg.canal_delay_hours},
+                       "fp": round(effective_fuel_price(cfg.fuel_price, cfg.origin, e), 2),
+                       "av": sorted(cfg.avoid), "cd": cfg.canal_delay_hours,
+                       "tvm": e.time_value_mult, "cp": e.carbon_usd_per_t, "eua": e.eua_usd_per_t,
+                       "etsc": e.ets_coverage_pct, "ets": ets_applies(cfg.origin, cfg.destination, e)},
                       sort_keys=True, default=str)
 
 
@@ -234,7 +250,10 @@ def _priced_graph(key: str, model_id: int):
         for _, _, d in G.edges(data=True):
             if d["mode"] == "canal":
                 d["wait_hours"] = d["wait_hours"] + cfg.canal_delay_hours
-    costs = price_edge_batch(G.edges(data=True), cfg.agent(), cfg.fuel_price, _MODELS.get(model_id))
+    econ = Economics(time_value_mult=k["tvm"], carbon_usd_per_t=k["cp"], eua_usd_per_t=k["eua"],
+                     ets_coverage_pct=k["etsc"])
+    costs = price_edge_batch(G.edges(data=True), cfg.agent(), cfg.fuel_price, _MODELS.get(model_id),
+                             econ=econ, ets_active=k["ets"])
     avoid = set(cfg.avoid)
     if avoid:
         for key_, c in costs.items():
@@ -252,7 +271,7 @@ def lane_metrics(c: EdgeCost, d: dict, agent: RoutingAgent, frac: float = 1.0, w
     wait = d["wait_hours"] if with_entry else 0.0
     hours = sea_h + wait
     expenses = c.fuel_usd * frac + (c.toll_usd if with_entry else 0.0) + c.war_usd * frac \
-        + hours * agent.vessel.daily_asset_cost_usd / 24.0
+        + (c.eca_usd + c.ets_usd + c.carbon_usd) * frac + hours * agent.vessel.daily_asset_cost_usd / 24.0
     risk = sea_h * (d["geopolitical_risk"] + 0.5 * d["weather_risk"])
     return hours, expenses, risk
 
@@ -326,7 +345,9 @@ def _make_leg(ctx: Context, x: str, y: str, f0: float, f1: float, entered: bool,
                fuel_t=c.fuel_t * frac, fuel_usd=c.fuel_usd * frac, toll_usd=0.0 if entered else c.toll_usd,
                war_usd=c.war_usd * frac, time_usd=hours * agent.delay_penalty_usd_per_hr,
                risk=sea_h * (d["geopolitical_risk"] + 0.5 * d["weather_risk"]), chokepoint=d["chokepoint"],
-               note=c.soft_block or "", entered=entered, queued_h=queued_h)
+               note=c.soft_block or "", entered=entered, queued_h=queued_h,
+               eca_usd=c.eca_usd * frac, ets_usd=c.ets_usd * frac, co2_t=c.co2_t * frac,
+               carbon_usd=c.carbon_usd * frac, speed_kn=c.speed_kn)
 
 
 def _turn_leg(ctx: Context, leg: Leg, extra_h: float = TURN_PENALTY_H) -> Leg:
@@ -373,6 +394,10 @@ def summarise(ctx: Context, legs: list, label: str = "", forced: bool = False) -
         s.toll_usd += l.toll_usd
         s.war_usd += l.war_usd
         s.time_usd += l.time_usd
+        s.eca_usd += l.eca_usd
+        s.ets_usd += l.ets_usd
+        s.co2_t += l.co2_t
+        s.carbon_usd += l.carbon_usd
         if l.kind == "sail":
             keys = [ctx.G.nodes[l.x]["chokepoint"] if l.f0 == 0.0 else None, l.chokepoint,
                     ctx.G.nodes[l.y]["chokepoint"] if l.f1 >= 1.0 - 1e-9 else None]
@@ -518,7 +543,8 @@ def score(ctx: Context, s: RouteSummary, pref: str) -> float:
     if not s.feasible:
         return math.inf
     agent = ctx.agent
-    expenses = s.fuel_usd + s.toll_usd + s.war_usd + s.hours * agent.vessel.daily_asset_cost_usd / 24.0
+    expenses = s.fuel_usd + s.toll_usd + s.war_usd + s.eca_usd + s.ets_usd + s.carbon_usd \
+        + s.hours * agent.vessel.daily_asset_cost_usd / 24.0
     risk = sum(l.risk for l in s.legs)
     penalty = FORCED_PENALTY if s.forced else 1.0
     if pref == "fastest":
@@ -639,10 +665,12 @@ def split_at(v: Voyage, G: nx.Graph) -> tuple[list, list, Position]:
     f = l.f0 + (l.f1 - l.f0) * p
     sailed = replace(l, f1=f, nm=l.nm * p, sea_h=l.sea_h * p, fuel_t=l.fuel_t * p, fuel_usd=l.fuel_usd * p,
                      war_usd=l.war_usd * p, risk=l.risk * p, time_usd=(l.wait_h + l.sea_h * p) / max(l.hours, 1e-9)
-                     * l.time_usd)
+                     * l.time_usd, eca_usd=l.eca_usd * p, ets_usd=l.ets_usd * p, co2_t=l.co2_t * p,
+                     carbon_usd=l.carbon_usd * p)
     rest = replace(l, f0=f, entered=True, nm=l.nm * (1 - p), wait_h=0.0, sea_h=l.sea_h * (1 - p), fuel_t=l.fuel_t * (1 - p),
                    fuel_usd=l.fuel_usd * (1 - p), toll_usd=0.0, war_usd=l.war_usd * (1 - p), risk=l.risk * (1 - p),
-                   time_usd=l.time_usd - sailed.time_usd)
+                   time_usd=l.time_usd - sailed.time_usd, eca_usd=l.eca_usd * (1 - p), ets_usd=l.ets_usd * (1 - p),
+                   co2_t=l.co2_t * (1 - p), carbon_usd=l.carbon_usd * (1 - p))
     done.append(sailed)
     ahead.insert(0, rest)
     pos = Position(node=l.y) if f >= 1 - 1e-9 else Position(x=l.x, y=l.y, f=f)
@@ -868,14 +896,16 @@ def _worth_changing(ctx: Context, hold: RouteSummary, alt: RouteSummary) -> bool
     """Hysteresis: leave the committed route only if the alternative beats it by ``change_course_threshold_usd`` in
     the terms of the active objective (sunk costs excluded, since only remaining legs are compared):
     fastest = hours saved x the cost of a delayed hour; cheapest = expenses (no lateness penalty); balanced and
-    safest = all-in cost incl. time. 'Safest' also switches on a clear risk reduction."""
+    safest = all-in cost incl. time. Cheapest, balanced and safest also count the carbon shadow price, because the
+    route search does: otherwise a cleaner route the objective prefers could never clear the threshold.
+    'Safest' also switches on a clear risk reduction."""
     cfg = ctx.config
     if cfg.preference == "fastest":
         gain = (hold.hours - alt.hours) * ctx.agent.delay_penalty_usd_per_hr
     elif cfg.preference == "cheapest":
-        gain = (hold.total_usd - hold.time_usd) - (alt.total_usd - alt.time_usd)
+        gain = (hold.total_usd - hold.time_usd + hold.carbon_usd) - (alt.total_usd - alt.time_usd + alt.carbon_usd)
     else:
-        gain = hold.total_usd - alt.total_usd
+        gain = (hold.total_usd + hold.carbon_usd) - (alt.total_usd + alt.carbon_usd)
     if gain >= cfg.change_course_threshold_usd:
         return True
     return cfg.preference == "safest" and hold.risk_index - alt.risk_index >= SAFEST_SWITCH_RISK_POINTS
@@ -935,7 +965,8 @@ def projected(v: Voyage, G: nx.Graph) -> dict:
     done, ahead, _ = split_at(v, G)
     tot = lambda legs, k: sum(getattr(l, k) for l in legs)
     sea_h = tot(v.legs, "sea_h")
-    out = {k: tot(v.legs, k) for k in ("nm", "fuel_t", "fuel_usd", "toll_usd", "war_usd", "time_usd")}
+    out = {k: tot(v.legs, k) for k in ("nm", "fuel_t", "fuel_usd", "toll_usd", "war_usd", "time_usd", "eca_usd",
+                                       "ets_usd", "co2_t", "carbon_usd")}
     out["total_usd"] = sum(l.total_usd for l in v.legs)
     out["remaining_usd"] = sum(l.total_usd for l in ahead)
     out["spent_usd"] = sum(l.total_usd for l in done)
