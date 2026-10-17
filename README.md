@@ -1,4 +1,6 @@
-# Tideline - Live AI Shipping Operations Simulator
+# Tideline v1 - Live AI Shipping Operations Simulator
+
+Finalized version at this repo(contributed): https://github.com/tvishavudanrao-hub/maritime-hackathon-code
 
 Hackathon prototype (c0mpiled-14 · UC Berkeley · YC RFS: *New Operating Systems for the Physical World*).
 
