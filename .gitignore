@@ -32,3 +32,6 @@ dist/
 # Coverage artefacts
 .coverage
 htmlcov/
+
+# Local bundles
+*.zip
