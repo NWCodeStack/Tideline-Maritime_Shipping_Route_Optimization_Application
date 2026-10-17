@@ -3,7 +3,7 @@
 Context for anyone (human or AI) picking up this repo. It condenses the full build thread: what the project is, what
 was asked for, what was decided and why, how the code fits together, and what is still open.
 User-facing docs live in `README.md` (refreshed in Phase 6); this file is
-the engineering history and the house rules. Last updated 2026-10-16, after Phases 1-7 (all committed, pushed and deployed):
+the engineering history and the house rules. Last updated 2026-10-17, after Phases 1-7 plus review follow-ups (all committed, pushed and deployed):
 see "Phase 7" under Known limitations / next steps.
 
 ## What this is
@@ -45,7 +45,7 @@ hackathon project (c0mpiled-14, YC RFS *Operating Systems for the Physical World
 
 * Hidden checkpoints (not on any branch): `git for-each-ref refs/checkpoints` (one per phase); log in
   `.claude/checkpoints.log` (git-ignored). Phase tags `phase1`..`phase5` also exist.
-* **329 tests pass** (279 before Phase 7). The review/checkpoint pattern after every phase: tests first, implement, full suite,
+* **349 tests pass** (279 before Phase 7; `tests/test_phase7_playback.py` 50, `tests/test_phase7_review.py` 20). The review/checkpoint pattern after every phase: tests first, implement, full suite,
   lint (`ruff --select F,B`), `bandit -ll`, browser check, code review, commit locally.
 
 ## Commands
@@ -54,7 +54,7 @@ hackathon project (c0mpiled-14, YC RFS *Operating Systems for the Physical World
 python -m venv .venv && .venv\Scripts\activate          # Windows (Python 3.14 was used; 3.12 untested locally)
 pip install -r requirements.txt
 streamlit run app.py                                    # app (trains models/fuel_model.pkl on first launch)
-python -m pytest -q                                     # 329 tests (pytest.ini selects test_routing.py + tests/)
+python -m pytest -q                                     # 349 tests (pytest.ini selects test_routing.py + tests/)
 python app.py                                           # console stress-test demo
 ```
 `TIDELINE_OFFLINE=1` disables all network calls (tests, offline demos). **No API key is required for anything**, and
@@ -284,16 +284,36 @@ measured (the loop drew on 87% of callbacks and was never the bottleneck); (b) w
 fragment ticks arrive ~6 s apart, hit the 3 s stall cap and the server resyncs the ship backwards by up to 30 simulated hours
 at 10 h/s (designed behaviour; a visible tab ticks every 1 s and does not); (c) not browser-tested: Panama close/reopen turn,
 the demo stopping at Port Said, the offline SVG map animation, 5 reroutes loop count, near-idle CPU at 0.1 h/s;
-(d) `/code-review` ran: open findings are the stall-resync backward jump, the seek echo guard swallowing near-equal real seeks, port warnings only refreshed on full reruns, `IMPERATIVE_RE` gaining `play|slow|speed`, `playback <number>` parsing durations as h/s, `anim._unwrap_lon` duplicating `folium_map.unwrap`, and missing tests for the seek guard / `_tick_and_sync`.
+(d) `/code-review` + `/python-review` ran; follow-ups fixed in `06783a1` (see "Review follow-ups" below). Still open: only (b).
+
+*Review follow-ups (2026-10-17, tests first, `tests/test_phase7_review.py`):* `IMPERATIVE_RE` now takes only real playback
+phrases (`play in/at/to`, `slow down` / `slow the sim..`, `speed up`) instead of bare `play|slow|speed`; `playback <n>` is not a
+speed when `<n>` is followed by a duration or knots; "playback 10 h/s and 14 knots" applies both ops; the seek echo guard is
+`live.seek_is_echo` / `remember_seek` (only while playing, last `SEEK_ECHO_WINDOW`=5 written values); port rings refresh
+through `live._refresh_if_port_rings_changed` (0.4 ms per tick, reruns only when `warning_signature` changes);
+`geo.unwrap` is shared by `folium_map` and `anim`; `_tick_and_sync` is covered with a mocked `st.rerun`.
+
+*User confirmed 2026-10-17:* the speed slider and Phase 7 behaviour work on https://tideline.streamlit.app/.
 
 *Housekeeping:* an untracked `tideline-phase6.zip` appeared in the project root that no command from this work created;
 leave or delete it by hand, it is not source. `.claude/launch.json` was temporarily edited for the spike and restored
 to its single `streamlit` entry. The spike app lived only in the session scratchpad.
 
 **Open items and known limits**
-* Not deployed. When approved: push to GitHub (`gh` is not installed here: create an empty repo on github.com, add the
-  remote), then Streamlit Community Cloud with main file `app.py`, Python 3.12 (untested locally; only 3.14 here),
-  no secrets. First launch trains the fuel model in ~20-30 s on the cloud.
+* Deployed: GitHub repo `NWCodeStack/Tideline-Maritime_Shipping_Route_Optimization_Application`, Streamlit Cloud app
+  https://tideline.streamlit.app/ (main file `app.py`, rules mode, no secrets). `gh` is not installed here, so pushes use
+  plain `git push origin main`. Python 3.12 on the cloud is untested locally (only 3.14 here).
+* Privacy: history was rewritten once so every commit is `NWCodeStack <NWCodeStack@users.noreply.github.com>`; the old
+  commits may still be reachable on GitHub by direct SHA (only GitHub Support can purge them). The user should enable
+  GitHub's "Keep my email addresses private" and "Block command line pushes that expose my email" and check their public
+  profile name. Local-only `refs/checkpoints` still carry the old emails (never pushed).
+* Known limit kept on purpose: when the browser tab is hidden, timers throttle, ticks hit the 3 s stall cap and the ship
+  eases backwards by up to ~30 simulated hours at 10 h/s; a visible tab does not do this. A real fix means one authoritative
+  clock after a stall (its own change).
+* Next ideas: browser-test the Panama close/reopen turn, the demo stopping at Port Said, the offline SVG map animation and
+  near-idle CPU at 0.1 h/s; measure 50+ fps in a visible real browser (the built-in pane caps rAF at ~28/s); consider
+  pinning dependency versions in `requirements.txt` and testing on Python 3.12; AgentShield grade B is only missing
+  prompt-defence wording in this file; `bandit -ll` still has the 3 known notes (RSS XML parse, 2 pickle loads).
 * Deferred: bunkering stops and tank/reserve hard rules, deadlines (so "what if we arrive a day later?" is unsupported),
   Pareto set, "Today vs Normal" snapshot, fleet picker, port-draft markers.
 * Weather risk is not checked against a ship wave limit; traffic risk is only the simulated canal delay.
@@ -302,8 +322,7 @@ to its single `streamlit` entry. The spike app lived only in the session scratch
   rate-limited here (Google News RSS fallback); LLM mode is untested end to end (no key).
 * Every full rerun executes all five tab bodies (Streamlit has no lazy tabs), including the options solve.
 * The right-hand tab strip overflows below ~800 px (last label scrolls); the 1280/1440 px widths were not re-tested.
-* A scratch folder named `tl_prev` at the root of the dev machine's C: drive (a copy of an older commit used for a
-  before/after test) can be deleted by hand; the built-in safety check blocked removing it from the session.
+* Scratch folders `C:	l_prev` (older-commit copy) may still exist on the dev machine; delete by hand (the session's safety check blocks removal outside the project). `C:	lcv` was removed by the user.
 
 ## Working notes for AI sessions in this repo
 
@@ -315,7 +334,8 @@ to its single `streamlit` entry. The spike app lived only in the session scratch
 * `AppTest.from_file` needs an absolute path (relative paths resolve against the test file). Headless layout tests live
   in `tests/test_phase4_layout.py`; what they cannot see (the map element surviving tab switches) was checked in the
   built-in browser with a marker on the Leaflet container.
-* Browser checks: Streamlit element refs go stale after every rerun; re-`find` before clicking.
+* Browser checks: Streamlit element refs go stale after every rerun; re-`find` before clicking. Keep the preview pane shown (`show_pane preview`): a hidden pane throttles rAF and timers and fakes stall resyncs. Typing several copilot commands in a row can drop some while the page reruns.
+* The fact-forcing gate also blocks `rm -rf`, force-push and history rewrites until the facts (files touched, rollback, user's verbatim instruction) are stated in text right before the retry; auto mode may still deny history rewrites in the project repo, so do those on a scratchpad clone and ask the user before any force-push.
 * Windows: no bash-only tricks in scripts; pip installs can hit the long-path limit under the scratchpad (use a short path).
 
 ## Conventions
