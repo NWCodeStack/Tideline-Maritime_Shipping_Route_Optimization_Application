@@ -35,6 +35,7 @@ from agents import CARGO_OWNERS, VESSEL_OWNERS, VESSELS, RoutingAgent, make_agen
 from data_engine import CHOKEPOINTS, build_maritime_graph, haversine_nm
 from economics import Economics, effective_fuel_price, ets_applies
 from events import apply_events, describe, normalise
+from geo import bearing_deg, legs_polyline, node_ll, point_on_lane  # noqa: F401  (re-exported: voyage.node_ll etc.)
 from risk import TRAFFIC_FULL_RISK_DELAY_H, WEATHER_WEIGHT, band, route_risk
 from routing_engine import DEFAULT_FUEL_PRICE_USD_PER_T, FUEL_MODEL, EdgeCost, price_edge_batch
 
@@ -295,45 +296,6 @@ def _weight(ctx: Context, c: EdgeCost, d: dict, pref: str, frac: float = 1.0, wi
 
 
 # --------------------------------------------------------------------------------------------------
-# Geometry
-# --------------------------------------------------------------------------------------------------
-def node_ll(G: nx.Graph, n: str) -> tuple[float, float]:
-    d = G.nodes[n]
-    return d["lat"], d["lon"]
-
-
-def point_on_lane(G: nx.Graph, x: str, y: str, f: float) -> tuple[float, float]:
-    (la, lo), (lb, lb_lon) = node_ll(G, x), node_ll(G, y)
-    dlon = lb_lon - lo
-    if dlon > 180:
-        dlon -= 360
-    elif dlon < -180:
-        dlon += 360
-    lon = lo + dlon * f
-    return la + (lb - la) * f, (lon + 180.0) % 360.0 - 180.0
-
-
-def bearing_deg(lat1, lon1, lat2, lon2) -> float:
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dl = math.radians(lon2 - lon1)
-    yv = math.sin(dl) * math.cos(p2)
-    xv = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
-    return (math.degrees(math.atan2(yv, xv)) + 360.0) % 360.0
-
-
-def legs_polyline(G: nx.Graph, legs: list) -> list[tuple[float, float]]:
-    pts: list[tuple[float, float]] = []
-    for l in legs:
-        if l.kind == "hold":
-            continue
-        a, b = point_on_lane(G, l.x, l.y, l.f0), point_on_lane(G, l.x, l.y, l.f1)
-        if not pts or pts[-1] != a:
-            pts.append(a)
-        pts.append(b)
-    return pts
-
-
-# --------------------------------------------------------------------------------------------------
 # Building legs from a path and summarising them
 # --------------------------------------------------------------------------------------------------
 def _make_leg(ctx: Context, x: str, y: str, f0: float, f1: float, entered: bool, queued_h: float = 0.0) -> Leg:
@@ -488,6 +450,69 @@ def reachable_ports(ctx: Context, pos: Position) -> set[str]:
     return {n for n in reach if G.nodes[n]["kind"] == "port"}
 
 
+def _routing_graph(ctx: Context, pos: Position, pref: str, relaxed: bool) -> tuple[nx.DiGraph, str]:
+    """Directed weighted graph for one routing pass, plus the start node (the virtual vessel node when mid-lane)."""
+    G = ctx.G
+    H = nx.DiGraph()
+    H.add_nodes_from(G.nodes)
+    for key, c in ctx.costs.items():
+        if c.hard_block or (c.soft_block and not relaxed):
+            continue
+        u, v = tuple(key)
+        w = _weight(ctx, c, G.edges[u, v], pref)
+        H.add_edge(u, v, w=w)
+        H.add_edge(v, u, w=w)
+    if pos.node is not None:
+        return H, pos.node
+    # on a lane: may continue to y or turn back to x
+    c = ctx.costs[frozenset((pos.x, pos.y))]
+    d = G.edges[pos.x, pos.y]
+    in_canal = d["mode"] == "canal"        # a transit in progress is completed, and nobody turns round in a canal
+    if in_canal or not (c.hard_block or (c.soft_block and not relaxed)):
+        H.add_edge(VIRTUAL, pos.y, w=_weight(ctx, c, d, pref, 1.0 - pos.f, with_entry=False))
+    if not in_canal:
+        back = replace(c, hard_block=None, soft_block=None)     # retreating along the lane is always allowed
+        H.add_edge(VIRTUAL, pos.x, w=_weight(ctx, back, d, pref, pos.f, with_entry=False)
+                   + _turn_weight(ctx, pref))
+        if H.has_edge(pos.y, pos.x):       # ...and "forward to y, then straight back" is the same U-turn
+            H[pos.y][pos.x]["w"] += _turn_weight(ctx, pref)
+    return H, VIRTUAL
+
+
+def _legs_from_path(ctx: Context, path: list, pos: Position, prev_lane, reverses: bool) -> list[Leg]:
+    legs: list[Leg] = []
+    for a, b in zip(path, path[1:]):
+        if a == VIRTUAL:
+            if b == pos.y:
+                legs.append(_make_leg(ctx, pos.x, pos.y, pos.f, 1.0, entered=True))
+            else:                               # turning back: sail the lane y->x from (1-f) to 1
+                legs.append(_turn_leg(ctx, _make_leg(ctx, pos.y, pos.x, 1.0 - pos.f, 1.0, entered=True)))
+            continue
+        leg = _make_leg(ctx, a, b, 0.0, 1.0, entered=False)
+        prev = legs[-1] if legs else None
+        if (reverses and a == pos.node and b == prev_lane[0] and not legs) or                 (prev is not None and prev.kind == "sail" and (prev.x, prev.y) == (b, a)):
+            leg = _turn_leg(ctx, leg)
+        legs.append(leg)
+    return legs
+
+
+def _no_passage(ctx: Context, pos: Position, dest: str, pref: str, H: nx.DiGraph, start: str) -> RouteSummary:
+    G = ctx.G
+    closed = sorted({f"{CHOKEPOINTS.get(G.edges[tuple(k)]['chokepoint'], '/'.join(sorted(k)))}: {c.hard_block}"
+                     for k, c in ctx.costs.items() if c.hard_block})
+    where = pos.node and G.nodes[pos.node]["name"] or f"the ship's position near {G.nodes[pos.x]['name']}"
+    near = nearest_reachable_port(G, H, start, dest)
+    if near:
+        hint = f" Nearest port still reachable: {G.nodes[near[0]]['name']}, {near[1]:,.0f} nm from {G.nodes[dest]['name']}."
+    elif pos.node is not None and G.nodes[pos.node]["kind"] == "port":
+        hint = f" The ship is at {where}, the only port it can still reach."
+    else:
+        hint = ""
+    return RouteSummary(label=pref, feasible=False,
+                        reason=f"No feasible sea passage from {where} to {G.nodes[dest]['name']}. "
+                               + ("Closed: " + "; ".join(closed[:4]) + "." if closed else "") + hint)
+
+
 def route_from(ctx: Context, pos: Position, dest: str, pref: str, via: str | None = None,
                add_berth: bool = True, prev_lane: tuple[str, str] | None = None) -> RouteSummary:
     """Best route from ``pos`` to ``dest`` under ``pref``. Strict pass first (no storm-closed / over-premium lanes),
@@ -502,31 +527,8 @@ def route_from(ctx: Context, pos: Position, dest: str, pref: str, via: str | Non
             return RouteSummary(label=pref, feasible=False, reason=second.reason)
         return summarise(ctx, first.legs + second.legs, pref, first.forced or second.forced)
 
-    G = ctx.G
     for relaxed in (False, True):
-        H = nx.DiGraph()
-        H.add_nodes_from(G.nodes)
-        for key, c in ctx.costs.items():
-            if c.hard_block or (c.soft_block and not relaxed):
-                continue
-            u, v = tuple(key)
-            w = _weight(ctx, c, G.edges[u, v], pref)
-            H.add_edge(u, v, w=w)
-            H.add_edge(v, u, w=w)
-        start = pos.node
-        if pos.node is None:                       # on a lane: may continue to y or turn back to x
-            start = VIRTUAL
-            c = ctx.costs[frozenset((pos.x, pos.y))]
-            d = G.edges[pos.x, pos.y]
-            in_canal = d["mode"] == "canal"        # a transit in progress is completed, and nobody turns round in a canal
-            if in_canal or not (c.hard_block or (c.soft_block and not relaxed)):
-                H.add_edge(VIRTUAL, pos.y, w=_weight(ctx, c, d, pref, 1.0 - pos.f, with_entry=False))
-            if not in_canal:
-                back = replace(c, hard_block=None, soft_block=None)     # retreating along the lane is always allowed
-                H.add_edge(VIRTUAL, pos.x, w=_weight(ctx, back, d, pref, pos.f, with_entry=False)
-                           + _turn_weight(ctx, pref))
-                if H.has_edge(pos.y, pos.x):       # ...and "forward to y, then straight back" is the same U-turn
-                    H[pos.y][pos.x]["w"] += _turn_weight(ctx, pref)
+        H, start = _routing_graph(ctx, pos, pref, relaxed)
         if start == dest:
             legs = [_berth_leg(ctx, dest, berth_hours(ctx, dest), "berth wait")] if add_berth else []
             return summarise(ctx, legs, pref)
@@ -538,37 +540,11 @@ def route_from(ctx: Context, pos: Position, dest: str, pref: str, via: str | Non
             path = nx.dijkstra_path(H, start, dest, weight="w")
         except nx.NetworkXNoPath:
             continue
-        legs: list[Leg] = []
-        for a, b in zip(path, path[1:]):
-            if a == VIRTUAL:
-                if b == pos.y:
-                    legs.append(_make_leg(ctx, pos.x, pos.y, pos.f, 1.0, entered=True))
-                else:                               # turning back: sail the lane y->x from (1-f) to 1
-                    legs.append(_turn_leg(ctx, _make_leg(ctx, pos.y, pos.x, 1.0 - pos.f, 1.0, entered=True)))
-            else:
-                leg = _make_leg(ctx, a, b, 0.0, 1.0, entered=False)
-                prev = legs[-1] if legs else None
-                if (reverses and a == pos.node and b == prev_lane[0] and not legs) or \
-                        (prev is not None and prev.kind == "sail" and (prev.x, prev.y) == (b, a)):
-                    leg = _turn_leg(ctx, leg)
-                legs.append(leg)
+        legs = _legs_from_path(ctx, path, pos, prev_lane, reverses)
         if add_berth:
             legs.append(_berth_leg(ctx, dest, berth_hours(ctx, dest), "berth wait"))
         return summarise(ctx, legs, pref, forced=relaxed)
-
-    closed = sorted({f"{CHOKEPOINTS.get(ctx.G.edges[tuple(k)]['chokepoint'], '/'.join(sorted(k)))}: {c.hard_block}"
-                     for k, c in ctx.costs.items() if c.hard_block})
-    where = pos.node and G.nodes[pos.node]["name"] or f"the ship's position near {G.nodes[pos.x]['name']}"
-    near = nearest_reachable_port(G, H, start, dest)
-    if near:
-        hint = f" Nearest port still reachable: {G.nodes[near[0]]['name']}, {near[1]:,.0f} nm from {G.nodes[dest]['name']}."
-    elif pos.node is not None and G.nodes[pos.node]["kind"] == "port":
-        hint = f" The ship is at {where}, the only port it can still reach."
-    else:
-        hint = ""
-    return RouteSummary(label=pref, feasible=False,
-                        reason=f"No feasible sea passage from {where} to {G.nodes[dest]['name']}. "
-                               + ("Closed: " + "; ".join(closed[:4]) + "." if closed else "") + hint)
+    return _no_passage(ctx, pos, dest, pref, H, start)
 
 
 def reprice(ctx: Context, legs: list, label: str = "Hold course") -> RouteSummary:
