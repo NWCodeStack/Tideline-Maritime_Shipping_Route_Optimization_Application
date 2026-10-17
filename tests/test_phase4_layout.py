@@ -61,6 +61,11 @@ class TestShell(unittest.TestCase):
         for k in ("cfg_preset", "cfg_tvm", "cfg_carbon", "cfg_ets_on"):
             self.assertIn(k, keys, k)
 
+    def test_map_legend_explains_the_hazard_overlay(self):
+        text = " ".join(c.value for c in self.at.caption)
+        for needle in ("tinted boxes", "risk band", "red ring", "amber ring"):
+            self.assertIn(needle, text)
+
     def test_the_sidebar_hint_is_gone(self):
         text = " ".join(m.value for m in self.at.markdown)
         self.assertNotIn("Advanced settings: sidebar", text)

@@ -717,7 +717,9 @@ def map_fragment(st, ss, ops, model, ui, V, has_folium, st_folium, build_base, b
                   step=1.0, key="seek_h", on_change=on_seek, disabled=v.status == "blocked" or not v.legs)
         st.caption("Mint = completed track · solid = remaining plan · grey dashed = previous committed route · amber dotted = "
                    "alternatives considered · red dashed = blocked plan · circles = Open-Meteo forecast at the "
-                   "simulated ETA · purple = storm scenario.")
+                   "simulated ETA · purple = storm scenario · tinted boxes = security zones by risk band (hover for the "
+                   "numbers, hide them in the layer menu) · red ring = port with no sea passage from the ship · amber "
+                   "ring = port congestion scenario.")
     return live_map
 
 
