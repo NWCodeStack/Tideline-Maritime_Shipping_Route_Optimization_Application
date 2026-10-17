@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import math
 
-from geo import bearing_deg, node_ll, point_on_lane
+from geo import bearing_deg, node_ll, point_on_lane, unwrap
 
 SAMPLE_NM = 300.0          # moving legs are sampled at least this densely so straight-line steps stay on the lane
 
@@ -50,17 +50,9 @@ def _end_sample(G, leg, t_end: float, prev: list) -> list:
 
 
 def _unwrap_lon(samples: list) -> None:
-    """Make longitudes continuous across the antimeridian (175 -> 185), as folium_map.unwrap does for polylines."""
-    offset, prev = 0.0, None
-    for s in samples:
-        lon = s[2]
-        if prev is not None:
-            if lon - prev > 180:
-                offset -= 360.0
-            elif prev - lon > 180:
-                offset += 360.0
-        prev = lon
-        s[2] = lon + offset
+    """Make sample longitudes continuous across the antimeridian (175 -> 185), like the map's polylines."""
+    for s, (_, lon) in zip(samples, unwrap([(s[1], s[2]) for s in samples]), strict=True):
+        s[2] = lon
 
 
 def build_track(v, G) -> list[list]:

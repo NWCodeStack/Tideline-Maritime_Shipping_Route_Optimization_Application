@@ -40,6 +40,24 @@ def _tick_and_sync(ops) -> None:
         st.rerun()
 
 
+SEEK_ECHO_WINDOW = 5             # how many recently written slider values can come back as a stale echo
+
+
+def remember_seek(written: tuple, value: float) -> tuple:
+    return (written + (value,))[-SEEK_ECHO_WINDOW:]
+
+
+def seek_is_echo(value: float, written: tuple, playing: bool) -> bool:
+    """While the clock runs, the browser can echo back a slider value the server wrote on an earlier tick; that is
+    not a drag. Stale echoes only happen while ticks are writing the slider, so a paused slider is never an echo."""
+    return playing and any(abs(value - w) < 0.05 for w in written)
+
+
+def warning_signature(warnings: list[dict]) -> tuple:
+    """What the map's port rings show (port and kind), order-free, so a change can be detected cheaply."""
+    return tuple(sorted((w["port"], w["kind"]) for w in warnings))
+
+
 def kpi_fragment(ops):
     @st.fragment(run_every=TICK_S if ops.playing else None)
     def kpis():
@@ -73,14 +91,28 @@ def kpi_fragment(ops):
     return kpis
 
 
+def _port_warnings(pg, ship_pos):
+    ops = pg.ops
+    return P.port_warnings(V.build_context(ops.cfg, ops.settings, pg.model), ship_pos, ops.settings, ops.G)
+
+
+def _refresh_if_port_rings_changed(pg) -> None:
+    """The map is no longer re-sent every tick, so the red/amber port rings (which depend on where the ship is) are
+    refreshed by re-running the page only when they would actually change."""
+    ss, ops = pg.ss, pg.ops
+    if not ops.playing or ss.get("map_mode") == "Offline map" or "_warn_sig" not in ss:
+        return
+    sig = warning_signature(_port_warnings(pg, V.ship_state(ops.voyage, ops.G).pos))
+    if sig != ss["_warn_sig"]:
+        st.rerun()
+
+
 def seek_fragment(pg):
     """The 'Voyage time' slider. It follows the clock while playing; a seek re-runs the page so the map snaps."""
     ss, ops = pg.ss, pg.ops
 
     def on_seek():
-        # While the clock runs, the browser can echo back a stale value the server wrote on an earlier tick; that is
-        # not a drag. Only a value the server did not itself write recently is a real seek.
-        if any(abs(float(ss["seek_h"]) - w) < 0.05 for w in ss.get("_seek_written", ())):
+        if seek_is_echo(float(ss["seek_h"]), ss.get("_seek_written", ()), ops.playing):
             return
         pg.on_seek()
         ss["_seeked"] = True
@@ -93,7 +125,8 @@ def seek_fragment(pg):
         v = ops.voyage
         total = max(v.total_hours, 0.1)
         ss["seek_h"] = float(min(round(v.t, 1), total))
-        ss["_seek_written"] = (ss.get("_seek_written", ()) + (ss["seek_h"],))[-30:]
+        ss["_seek_written"] = remember_seek(ss.get("_seek_written", ()), ss["seek_h"])
+        _refresh_if_port_rings_changed(pg)
         st.slider("Voyage time (hours since departure): drag to jump, or click a waypoint", 0.0, float(total),
                   step=1.0, key="seek_h", on_change=on_seek, disabled=v.status == "blocked" or not v.legs)
         st.caption("Mint = completed track · solid = remaining plan · grey dashed = previous committed route · amber "
@@ -120,7 +153,8 @@ def _interactive_map(pg, v, G, s, color, contract, wps, alts) -> None:
         ss["_base_map"] = build_ops_base_map(ctx.G, ops.settings, hazards=P.hazard_zones(ctx.G, V.base_graph()))
         ss["_base_key"] = base_key
     wx = pg.current_weather() or {}
-    warns = P.port_warnings(V.build_context(ops.cfg, ops.settings, model), s.pos, ops.settings, G)
+    warns = _port_warnings(pg, s.pos)
+    ss["_warn_sig"] = warning_signature(warns)
     layer = build_ops_layer(G, v, [], [], wps, s, alts, wx.get("points", []), color, port_warnings=warns,
                             contract=contract)
     base = ss["_base_map"]

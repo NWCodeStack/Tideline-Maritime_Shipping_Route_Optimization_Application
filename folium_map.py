@@ -14,6 +14,7 @@ from jinja2 import Template
 import anim
 from data_engine import GEO_ZONE, RED_SEA_ZONES
 from events import HURRICANE_TRACKS, normalise
+from geo import unwrap
 from panels import hazard_tooltip
 
 BLUE, AMBER, RED, STORM = "#2f80ed", "#f5a623", "#e5534b", "#a78bfa"
@@ -21,20 +22,6 @@ VESSEL_COLORS = {"Container": BLUE, "Tanker": AMBER}
 # Keyless dark basemap (CartoDB tiles now require an API key and render an "API KEY REQUIRED" watermark).
 DARK_TILES = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
 DARK_ATTR = "Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ"
-
-
-def unwrap(coords):
-    """[(lat, lon)] -> same points with longitudes made continuous across the antimeridian (e.g. 175 -> 185)."""
-    out, offset, prev = [], 0.0, None
-    for lat, lon in coords:
-        if prev is not None:
-            if lon - prev > 180:
-                offset -= 360.0
-            elif prev - lon > 180:
-                offset += 360.0
-        out.append((lat, lon + offset))
-        prev = lon
-    return out
 
 
 def _zone(m, key, color, label):

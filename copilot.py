@@ -72,7 +72,7 @@ IMPERATIVE_RE = re.compile(
     r"skip|start|begin|pause|stop|freeze|resume|continue|unpause|reset|restart|increase|raise|decrease|lower|cut|"
     r"reduce|switch|use|take|change|place|add|put|create|plan|open|reopen|lift|clear|remove|cancel|run|replay|"
     r"exit|avoid|find|go|move|jump|make|launch|sail|turn|depart|optimi[sz]e|recalculate|replan|end|quit|leave|"
-    r"play|slow|speed)\b")
+    r"play(?:back)?\s+(?:in|at|to)|slow\s+(?:down|the\s+(?:sim\w*|playback))|speed\s+up)\b")
 QUESTION_RE = re.compile(
     r"^\s*(is|are|was|were|does|do|did|has|have|can|could|will|should|what|which|how|why|when|where|who|show|tell|"
     r"list|give me|any|explain|describe|summari[sz]e|compare)\b")
@@ -266,10 +266,11 @@ def parse(text: str, ops: Ops) -> list[Op]:
     rate = re.search(NUM + r"\s*(?:h/s|hrs?/s|hours? per (?:real )?second|hours? a second)", t)
     playback = bool(re.search(r"\b(playback|sim(?:ulation)? speed)\b", t))
     real_time = bool(re.search(r"\breal[- ]?time\b", t)) and bool(re.search(r"\b(play\w*|run|speed|simulat\w*)\b", t))
-    if rate or real_time or (playback and re.search(NUM, t) and not re.search(NUM + r"\s*(?:knots|kn|kts)\b", t)):
-        hps = MIN_SPEED_H_PER_S if real_time and not rate else float((rate or re.search(NUM, t)).group(1))
+    bare = re.search(NUM + r"(?!\s*(?:knots|kn|kts|%|d\b|days?|h\b|hours?|hrs?\b|weeks?|wk))", t) if playback else None
+    if rate or real_time or bare:
+        hps = MIN_SPEED_H_PER_S if real_time and not rate else float((rate or bare).group(1))
         out.append(Op("set_playback", {"hours_per_s": hps}))
-    m = None if out and out[-1].name == "set_playback" else re.search(NUM + r"\s*(?:knots|kn|kts)\b", t)
+    m = re.search(NUM + r"\s*(?:knots|kn|kts)\b", t)
     if m and re.search(r"\b(speed|slow|steam|cruise|knots|kn)\b", t) and "storm" not in t:
         out.append(Op("set_speed", {"knots": float(m.group(1))}))
     pref = next((p for p in PREFERENCES if re.search(r"\b" + p + r"\b", t)), None)

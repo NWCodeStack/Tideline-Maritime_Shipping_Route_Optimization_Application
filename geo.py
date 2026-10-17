@@ -30,6 +30,20 @@ def bearing_deg(lat1, lon1, lat2, lon2) -> float:
     return (math.degrees(math.atan2(yv, xv)) + 360.0) % 360.0
 
 
+def unwrap(coords):
+    """[(lat, lon)] -> same points with longitudes made continuous across the antimeridian (e.g. 175 -> 185)."""
+    out, offset, prev = [], 0.0, None
+    for lat, lon in coords:
+        if prev is not None:
+            if lon - prev > 180:
+                offset -= 360.0
+            elif prev - lon > 180:
+                offset += 360.0
+        out.append((lat, lon + offset))
+        prev = lon
+    return out
+
+
 def legs_polyline(G: nx.Graph, legs: list) -> list[tuple[float, float]]:
     pts: list[tuple[float, float]] = []
     for l in legs:
