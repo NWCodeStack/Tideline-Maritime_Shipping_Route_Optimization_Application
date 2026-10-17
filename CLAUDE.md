@@ -3,7 +3,8 @@
 Context for anyone (human or AI) picking up this repo. It condenses the full build thread: what the project is, what
 was asked for, what was decided and why, how the code fits together, and what is still open.
 User-facing docs live in `README.md` (refreshed in Phase 6); this file is
-the engineering history and the house rules. Last updated 2026-10-16, after Phase 6.
+the engineering history and the house rules. Last updated 2026-10-16, after Phase 6 (committed) plus Phase 7
+(continuous playback, implemented and tested but NOT committed): see "Phase 7" under Known limitations / next steps.
 
 ## What this is
 
@@ -44,7 +45,7 @@ hackathon project (c0mpiled-14, YC RFS *Operating Systems for the Physical World
 
 * Hidden checkpoints (not on any branch): `git for-each-ref refs/checkpoints` (one per phase); log in
   `.claude/checkpoints.log` (git-ignored). Phase tags `phase1`..`phase5` also exist.
-* **279 tests pass, 95% coverage.** The review/checkpoint pattern after every phase: tests first, implement, full suite,
+* **329 tests pass** (279 before Phase 7). The review/checkpoint pattern after every phase: tests first, implement, full suite,
   lint (`ruff --select F,B`), `bandit -ll`, browser check, code review, commit locally.
 
 ## Commands
@@ -53,7 +54,7 @@ hackathon project (c0mpiled-14, YC RFS *Operating Systems for the Physical World
 python -m venv .venv && .venv\Scripts\activate          # Windows (Python 3.14 was used; 3.12 untested locally)
 pip install -r requirements.txt
 streamlit run app.py                                    # app (trains models/fuel_model.pkl on first launch)
-python -m pytest -q                                     # 279 tests (pytest.ini selects test_routing.py + tests/)
+python -m pytest -q                                     # 329 tests (pytest.ini selects test_routing.py + tests/)
 python app.py                                           # console stress-test demo
 ```
 `TIDELINE_OFFLINE=1` disables all network calls (tests, offline demos). **No API key is required for anything**, and
@@ -157,7 +158,7 @@ Header, "Latest reroute" banner, 4 KPI cards and the telemetry strip are full wi
 * **Pasted news** (Phase 5C): `copilot.handle` checks confirmation, then `looks_like_report`, before normal parsing;
   `_report_reply` stores `ops.proposal`; `_apply_proposal` runs exactly that op. `Ops.proposal` is cleared on reset, new
   voyage and clone. Closure only when the text says closed/blocked/blockade, otherwise Red Sea escalation 0.5 or Taiwan 0.4.
-* **Playback**: `Ops.tick()` by real elapsed seconds x speed; `kpi_fragment` and `map_fragment` run every 1 s while playing.
+* **Playback** (Phase 7): `Ops.tick()` by real elapsed seconds x speed (real time..200 h/s, `SPEED_STOPS`). The ship is animated in the browser from `anim.build_contract`; `map_fragment` has no `run_every` and re-sends the map only on a full rerun. `kpi_fragment` and `seek_fragment` tick every 1 s and call `st.rerun()` when a tick changes `ops.epoch` (arrival, stall resync, demo trigger). The seek slider ignores `on_change` values the server wrote itself (stale echo while the clock runs fast).
 * **Map without flicker**: base map cached per scenario settings; only the voyage `FeatureGroup` is pushed; it is
   detached after every `st_folium` call. Tab switches never rerun. Known quirk: the first one or two reruns after a
   page load recreate the map once (same on the pre-Phase-4 commit).
@@ -214,6 +215,80 @@ Header, "Latest reroute" banner, 4 KPI cards and the telemetry strip are full wi
 4. Acceptance check: Panama close/reopen turns toward Panama (test `TestReopenTurnsTowardPanama`); in the built-in
    browser the same map iframe survived all five right-hand tab switches (it is recreated after a scenario change, as
    before); risk scores show a band and the caption; every cost line shows its basis; no API key needed; tests pass.
+
+**Phase 7: continuous playback (DONE 2026-10-16; uncommitted, review pending)**
+
+Goal (user): a continuous playback speed control (real time up to 200 h/s instead of steps starting at 1 h/s) and a ship
+that glides at up to 60 fps in the browser, cheaply: adaptive frame pacing, no per-second map reloads, the rest of the
+app stays responsive. Brief: `tideline-continuous-playback-prompt.md` (the user's Downloads folder, not in the repo).
+
+*Design decisions (made and verified, do not redo):*
+* **Server stays the clock** (`Ops.tick`). The browser interpolates between syncs from a *contract*
+  (`anim.build_contract`): `{v, route_version, epoch, resync, snap, t_anchor_h, speed_h_per_s, playing, stop_h, status,
+  acts, track}`. `track` samples are `[t_h, lat, lon, course, sog_kn, activity_index]`; sample k describes the segment
+  k->k+1 with lat/lon linear in time exactly like `voyage.ship_state` (waits and holds included, moving legs sampled
+  at <= 300 nm, longitudes unwrapped across the antimeridian). `anim.interpolate` is the Python mirror of the JS maths.
+* **The contract holds no live clock reading**, so it is byte-identical from tick to tick while playing:
+  `t_anchor_h` is the voyage hour at the last clock event (`Ops.anchor_h`), and `status` is ready / active / arrived /
+  blocked (the raw voyage status flips on the first tick, so it is not used).
+* **No periodic re-anchor** (a deliberate deviation from the brief): the browser extrapolates from `performance.now()`,
+  so a hidden tab corrects itself on return. The server bumps `Ops.resync` only when `tick` hits the 3 s stall cap.
+* **Settle-the-clock fix** (a latent bug found while planning): `pause`, `set_speed`, `seek`, `advance_hours`,
+  `set_event`, `apply_settings` and `_reevaluate` now call `Ops._settle()` (a `tick`) first. Before, up to one tick of
+  played time was lost on pause (the ship snapped back) and a reroute started from a stale position. `_settle` is
+  skipped when the last tick used a caller-supplied clock (`_tick_manual`) and no `now` is given, so the existing
+  fake-clock tests (`test_live_ops.py:326-340`, `test_audit_fixes.py`) are unchanged; `pause(now=)` and
+  `set_speed(x, now=)` take an explicit clock for tests; a `_settling` flag prevents recursion.
+* **Clock events** call `Ops._bump(snap)`, which bumps `epoch` and sets `anchor_h` and `epoch_snap`; `_touch()` (any route
+  change) bumps with snap=True. Browser rule: snap on seek / reroute / first contract, ease over 300 ms for pause,
+  speed change and stall resync.
+* **The animation script rides inside the folium layer** (`folium_map._AnimScript`, a `MacroElement` in the feature
+  group). Spike result (scratch app, not in the repo): `streamlit-folium` 0.27.4 turns the feature group into a JS string
+  run in the map iframe with `map_div` in scope. An identical string is NOT re-run on a rerun; a changed string is
+  re-run once in the same iframe and map; old layer contents are removed; `window.feature_group` keeps stale references
+  (harmless, one per contract change). So no custom component and no MutationObserver are needed. In animated mode the
+  per-tick Python layer (ship marker, shrinking blue route, growing mint track) is replaced by the full planned route
+  drawn once in blue, with the mint completed track and the ship driven by JS.
+* **JS** lives in `anim.py`: `JS_CORE` (`tlStart(C, A)`), `_LEAFLET_ADAPTER`, `_SVG_ADAPTER`, `leaflet_script`,
+  `svg_script`. One loop per window (`window.__tl`; a new contract stops the old one). rAF is capped at 60 fps, skips
+  frames when the ship moved < 0.25 px, halves the rate (floor 20 fps) while draw cost > 6 ms and restores it under
+  3 ms, draws nothing while hidden, stops the rAF loop at rest (paused or at `stop_h`), makes no network calls and
+  allocates nothing per frame (it mutates Leaflet's `marker._latlng` and `tip.getLatLngs()`, then `update()` /
+  `redraw()`). `contract["perf"]` logs `[tl-perf]` once a second; `window.__tl.stats`, `.now()`, `.loops`, `.running()`
+  exist for browser checks. Both generated scripts pass `node --check` (Node 24 is installed).
+* **Speed control**: `ops.SPEED_STOPS` (Real time, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 200 h/s), `SPEEDS` dict kept,
+  `MIN_SPEED_H_PER_S = 1/3600`, `MAX_SPEED_H_PER_S = 200`, `nearest_stop_label` (log distance), `speed_caption`
+  ("10 h/s · 1 day ≈ 2.4 s"), clamping `set_speed`. Real time moves a 15 kn ship ~0.004 nm/s: the clock ticks but the
+  marker is practically still at world zoom (documented, not a bug). `DEMO_PLAYBACK_H_PER_S = 50` is untouched.
+* **Gotcha**: the copilot's existing `set_speed` op means VESSEL knots. Playback needs a NEW op, `set_playback`
+  (`hours_per_s`, real time..200), parsed before the knots rule when the text has h/s, per second, playback, sim speed
+  or real time.
+
+*Done (uncommitted, on top of `12fbff6`):* everything in the design above plus: `map_view.build_ops_map_html(contract=)`
+(SVG ids `tl-done`/`tl-tip`/`tl-ship`/`tl-rot`, `window.__tlScale`, pan/zoom kept in `sessionStorage` for the ops map only);
+`live.py` rewritten (`_tick_and_sync`, `seek_fragment`, `_interactive_map`, `?perf=1` query param turns on `[tl-perf]` logging);
+`select_slider` + `speed_caption` in the Operate tab; `ui.live_strip` lost `jump_h` and the TIME-LAPSE warning; copilot
+`set_playback` (schema range up to 10000, clamped to 200 on execute; `play`, `slow`, `speed` added to `IMPERATIVE_RE`);
+`Ops.start()` now settles the clock first. Two `test_live_ops` tests drive the clock by hand (`o.tick(now=0.0)`) because
+settle-the-clock correctly plays the few real ms between `start()` and the next call. 329 tests pass, `ruff --select F,B`
+clean, `bandit -ll` shows only the 3 known notes, both generated scripts pass `node --check`.
+
+*Browser-verified (built-in browser):* 1 loop for the whole session, draw cost 0.1-0.3 ms, exactly 10.0 h/s measured, map
+element (marker on the Leaflet container) survived 6 right-hand tab switches, KPI ticks, pause (browser clock frozen and equal
+to the server's), arrival at 200 h/s stops exactly at 531.6 h (no overshoot), copilot "Set playback to 200 h/s" works.
+*Found and fixed while verifying:* the seek slider's `on_change` fired with stale echoed values (56.1, 130.2) and moved the ship
+backwards; fixed with the written-values guard in `seek_fragment`.
+
+*Known limits / not verified:* (a) the built-in pane caps `requestAnimationFrame` at ~28/s, so the 50+ fps target was NOT
+measured (the loop drew on 87% of callbacks and was never the bottleneck); (b) with the pane hidden, browser timers throttle,
+fragment ticks arrive ~6 s apart, hit the 3 s stall cap and the server resyncs the ship backwards by up to 30 simulated hours
+at 10 h/s (designed behaviour; a visible tab ticks every 1 s and does not); (c) not browser-tested: Panama close/reopen turn,
+the demo stopping at Port Said, the offline SVG map animation, 5 reroutes loop count, near-idle CPU at 0.1 h/s;
+(d) `/code-review` and `/python-review` not yet run. Do not commit until the user says so; never push.
+
+*Housekeeping:* an untracked `tideline-phase6.zip` appeared in the project root that no command from this work created;
+leave or delete it by hand, it is not source. `.claude/launch.json` was temporarily edited for the spike and restored
+to its single `streamlit` entry. The spike app lived only in the session scratchpad.
 
 **Open items and known limits**
 * Not deployed. When approved: push to GitHub (`gh` is not installed here: create an empty repo on github.com, add the

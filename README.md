@@ -39,7 +39,7 @@ telemetry strip run full width. Below them are two columns:
   and the Operations Copilot docked under it.
 * **Right, five tabs** (the selected tab survives reruns):
   * **Operate** - status line (stay / change course / blocked), From / To / Vessel (container, oil tanker, bulk
-    carrier, LNG carrier; locked once underway, **Reset** to change), Start / Pause / Resume, +1 day, playback speed,
+    carrier, LNG carrier; locked once underway, **Reset** to change), Start / Pause / Resume, +1 day, playback speed (a slider from real time to 200 simulated hours per second; the ship glides in the browser between server syncs),
     the hackathon demo buttons, an incident picker (Suez, Bab-el-Mandeb, Hormuz, Panama closed) and a
     "Storms, fees and more scenarios" expander.
   * **Optimize** - preset (Balanced / Cheapest / Fastest / Safest / Greenest, or Custom), value of time, carbon price

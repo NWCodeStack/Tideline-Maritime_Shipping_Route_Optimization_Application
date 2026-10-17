@@ -11,6 +11,7 @@ Disruptions are SCENARIOS set by the user or the copilot, never claims about the
 from __future__ import annotations
 
 import copy
+import math
 import time
 from dataclasses import replace
 
@@ -37,7 +38,30 @@ DISRUPTIONS = {
 # Corridors the copilot can route "via" -> graph node
 VIA_NODES = {"cape": "CAPE", "suez": "PSD", "panama": "COL", "horn": "CHN", "malacca": "MAL1",
              "bab_el_mandeb": "BAB", "hormuz": "HOR"}
-SPEEDS = {"1 h/s": 1.0, "10 h/s": 10.0, "50 h/s": 50.0, "100 h/s": 100.0}
+
+# Playback speed, in simulated hours per real second. "Real time" is one simulated second per real second.
+MIN_SPEED_H_PER_S = 1.0 / 3600.0
+MAX_SPEED_H_PER_S = 200.0
+SPEED_STOPS = [("Real time", MIN_SPEED_H_PER_S), ("0.1 h/s", 0.1), ("0.25 h/s", 0.25), ("0.5 h/s", 0.5),
+               ("1 h/s", 1.0), ("2 h/s", 2.0), ("5 h/s", 5.0), ("10 h/s", 10.0), ("25 h/s", 25.0),
+               ("50 h/s", 50.0), ("100 h/s", 100.0), ("200 h/s", MAX_SPEED_H_PER_S)]
+SPEEDS = dict(SPEED_STOPS)
+MAX_TICK_S = 3.0                      # a stalled server never catches up by more than this much real time
+
+
+def nearest_stop_label(speed: float) -> str:
+    """The slider stop closest to ``speed`` on a log scale (speeds from the copilot or the demo are not always stops)."""
+    s = min(max(float(speed), MIN_SPEED_H_PER_S), MAX_SPEED_H_PER_S)
+    return min(SPEED_STOPS, key=lambda st: abs(math.log(st[1] / s)))[0]
+
+
+def speed_caption(speed: float) -> str:
+    """Plain words for a playback speed, e.g. '10 h/s · 1 day ≈ 2.4 s'."""
+    if speed <= MIN_SPEED_H_PER_S * 1.001:
+        return "Real time · 1 simulated second per real second (SIMULATED clock)"
+    day_s = 24.0 / speed
+    span = f"{day_s:.1f} s" if day_s < 120 else f"{day_s / 60:.0f} min" if day_s < 7200 else f"{day_s / 3600:.1f} h"
+    return f"{speed:g} h/s · 1 day ≈ {span}"
 
 
 class Ops:
@@ -51,6 +75,15 @@ class Ops:
         self._last_tick: float | None = None
         self.chat: list[dict] = []
         self.version = 0                  # bumps whenever the route/itinerary changes (map redraw key)
+        # The browser animates between server syncs from (anchor_h, speed). ``epoch`` bumps on every event that moves
+        # or re-times the clock, ``anchor_h`` is the voyage hour at that event, ``resync`` counts stalls the browser
+        # must correct, ``epoch_snap`` says whether the browser should jump (seek / reroute) or ease (pause / speed).
+        self.epoch = 0
+        self.anchor_h = 0.0
+        self.resync = 0
+        self.epoch_snap = True
+        self._tick_manual = False         # the last tick used a caller-supplied clock (tests): never settle against real time
+        self._settling = False
         self.demo: dict | None = None     # hackathon demo results (before/after snapshot)
         self._demo_target: float | None = None   # animated demo: voyage hour at which the closure triggers
         self._demo_source = "demo"
@@ -71,9 +104,28 @@ class Ops:
 
     def _touch(self) -> None:
         self.version += 1
+        self._bump(snap=True)
+
+    def _bump(self, snap: bool) -> None:
+        """Record a clock event for the browser animation (see ``anim.build_contract``)."""
+        self.epoch += 1
+        self.epoch_snap = snap
+        self.anchor_h = self.voyage.t
+    def _settle(self, now: float | None = None) -> None:
+        """Bring the clock up to date before any state change, so the time played since the last tick is neither lost
+        nor re-priced at a new speed, and a re-plan starts from where the ship is on screen. Skipped when the last
+        tick used a caller-supplied clock and no ``now`` is given (tests drive time by hand)."""
+        if not self.playing or self._settling or (now is None and self._tick_manual):
+            return
+        self._settling = True
+        try:
+            self.tick(now)
+        finally:
+            self._settling = False
 
     def _reevaluate(self, cause: str, source: str = "manual", **kw) -> str:
         """V.reevaluate plus a before/after snapshot whenever the remaining route or voyage status changes."""
+        self._settle()
         before = self.snapshot() if self.voyage.legs else None
         sig, status = V.route_signature(self.voyage), self.voyage.status
         msg = V.reevaluate(self.voyage, self.settings, self.model, cause=cause, source=source, **kw)
@@ -155,6 +207,7 @@ class Ops:
 
     # ---------------------------------------------------------------- playback
     def start(self) -> str:
+        self._settle()                    # "resume" while already playing must not drop the time played since the last tick
         v = self.voyage
         if v.status == "blocked":
             return f"Cannot start: voyage is blocked. {v.block_reason}"
@@ -167,11 +220,15 @@ class Ops:
                   "Simulated live tracking started.")
         self.playing = True
         self._last_tick = None
+        self._tick_manual = False
+        self._bump(snap=False)
         return f"Voyage started: {self.port_name(self.cfg.origin)} → {self.port_name(self.cfg.destination)}."
 
-    def pause(self) -> str:
+    def pause(self, now: float | None = None) -> str:
+        self._settle(now)
         self.playing = False
         self._last_tick = None
+        self._bump(snap=False)
         return f"Paused at voyage hour {self.voyage.t:,.1f} (day {self.voyage.t / 24:.1f})."
 
     def resume(self) -> str:
@@ -188,18 +245,30 @@ class Ops:
         self._touch()
         return "Voyage reset to departure with the current scenarios and assumptions."
 
-    def set_speed(self, sim_hours_per_s: float) -> None:
-        self.speed = float(sim_hours_per_s)
+    def set_speed(self, sim_hours_per_s: float, now: float | None = None) -> None:
+        """Playback speed in simulated hours per real second, clamped to [real time, 200 h/s]. The time played so far
+        is settled at the old speed first, so changing speed never re-prices time already elapsed."""
+        self._settle(now)
+        try:
+            speed = float(sim_hours_per_s)
+        except (TypeError, ValueError):
+            speed = self.speed
+        if math.isnan(speed):
+            speed = self.speed
+        self.speed = min(max(speed, MIN_SPEED_H_PER_S), MAX_SPEED_H_PER_S)
+        self._bump(snap=False)
 
     def tick(self, now: float | None = None) -> bool:
         """Advance by real elapsed time x playback speed. Returns True if the ship arrived during this tick."""
         if not self.playing:
             return False
+        self._tick_manual = now is not None
         now = time.monotonic() if now is None else now
         if self._last_tick is None:
             self._last_tick = now
             return False
-        dt = min(max(now - self._last_tick, 0.0), 3.0)        # cap catch-up after a stall
+        raw_dt = max(now - self._last_tick, 0.0)
+        dt = min(raw_dt, MAX_TICK_S)                          # cap catch-up after a stall
         self._last_tick = now
         step = dt * self.speed
         if self._demo_target is not None:                    # animated demo: stop exactly at the approach point
@@ -210,9 +279,14 @@ class Ops:
             return False
         if arrived or self.voyage.status in ("arrived", "blocked"):
             self.playing = False
+            self._bump(snap=False)
+        elif raw_dt > MAX_TICK_S:                            # the browser kept playing through the stall: re-anchor it
+            self.resync += 1
+            self._bump(snap=False)
         return arrived
 
     def advance_hours(self, hours: float, source: str = "manual") -> str:
+        self._settle()
         v = self.voyage
         if v.status == "blocked":
             return f"Ship is holding position: voyage blocked. {v.block_reason}"
@@ -224,14 +298,18 @@ class Ops:
             V.advance(v, self._demo_target - v.t)
             return self._demo_trigger(self._demo_source)
         V.advance(v, float(hours))
+        self._bump(snap=True)
         s = self.state()
         return (f"Advanced {hours / 24:.1f} days → voyage day {v.t / 24:.1f}. Ship at ({s.lat:.2f}, {s.lon:.2f}), "
                 f"{s.traveled_nm:,.0f} nm sailed, {s.remaining_nm:,.0f} nm to go"
                 + (" - ARRIVED." if v.status == "arrived" else "."))
 
     def seek(self, t_hours: float) -> str:
-        self._demo_target = None             # manual scrubbing cancels a pending animated-demo trigger
+        self._demo_target = None            # manual scrubbing cancels a pending animated-demo trigger
         V.seek(self.voyage, t_hours)
+        self._bump(snap=True)
+        # a seek is a new time origin: restart the tick interval here so the server and the browser agree from now on
+        self._last_tick = time.monotonic() if self.playing and not self._tick_manual else None
         return f"Moved to voyage hour {self.voyage.t:,.1f}."
 
     # ---------------------------------------------------------------- disruptions (scenarios)
@@ -252,6 +330,7 @@ class Ops:
             else:
                 label = f"{name} updated"
         cause = f"SCENARIO (simulated): {label}"
+        self._settle()                       # re-plan from where the ship is now, not from the last tick
         prev_settings, prev_voyage = self.settings, copy.deepcopy(self.voyage)
         self.settings = copy.deepcopy(self.settings)
         self.settings[key] = value
@@ -308,6 +387,7 @@ class Ops:
 
     def apply_settings(self, new: dict, label: str, source: str = "manual") -> str:
         """Replace all scenario settings at once (presets) with a single re-evaluation."""
+        self._settle()                       # re-plan from where the ship is now, not from the last tick
         prev_settings, prev_voyage = self.settings, copy.deepcopy(self.voyage)
         self.settings = default_settings() | copy.deepcopy(new)
         try:

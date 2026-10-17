@@ -75,7 +75,7 @@ def render_ui() -> None:
 
     import ui
     from data_engine import hub_ports
-    from live import kpi_fragment, map_fragment
+    from live import kpi_fragment, map_fragment, seek_fragment
     from ops import Ops
     from page import Page, get_base_graph, get_llm, get_model
     from stress_ui import stress_tab
@@ -105,7 +105,8 @@ def render_ui() -> None:
         kpi_fragment(ops)()                           # Route KPIs and telemetry (full width, tick during playback)
         map_col, side_col = st.columns([1.25, 1], gap="medium")
         with map_col:
-            map_fragment(pg)()
+            map_fragment(pg)()                        # animated in the browser: re-sent only when the route/clock changes
+            seek_fragment(pg)()
             render_copilot(pg)
         with side_col:
             t_op, t_opt, t_cmp, t_alert, t_src = st.tabs(RIGHT_TABS, key="right_tabs")

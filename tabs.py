@@ -24,7 +24,7 @@ from data_engine import CHOKEPOINTS
 from events import HURRICANE_TRACKS, PRESETS, describe
 from intel_ui import render_news, render_weather
 from ml_models import HULL
-from ops import SPEEDS
+from ops import SPEEDS, speed_caption
 from page import cached_marine, cached_news, md, show_df
 from routing_engine import predict_tonnes_per_day
 
@@ -142,8 +142,9 @@ def _playback(pg) -> None:
     b2.button("+1 day", on_click=cb(ops.advance_hours, 24.0), width="stretch", key="btn_day",
               disabled=v.status in ("blocked", "arrived"))
     b3.button("Reset", on_click=cb(ops.reset), width="stretch", key="btn_reset")
-    b4.selectbox("Playback (simulated h/s)", list(SPEEDS), key="play_speed", on_change=pg.on_speed,
-                 label_visibility="collapsed")
+    b4.select_slider("Playback speed (simulated hours per real second)", options=list(SPEEDS), key="play_speed",
+                     on_change=pg.on_speed, label_visibility="collapsed")
+    st.caption(speed_caption(ops.speed))
 
 
 def _demo_buttons(pg) -> None:

@@ -78,6 +78,7 @@ class Test2MidVoyageDisruption(unittest.TestCase):
         o = Ops()
         o.create_voyage("RTM", "SHA")
         o.start()
+        o.tick(now=0.0)                                               # hand-driven clock: no real time is played
         o.advance_hours(_time_on_lane(o.voyage, {"RS2", "RS3"}))       # in the middle of the Red Sea
         before = o.state()
         t_before = o.voyage.t
@@ -138,6 +139,7 @@ class Test4PhysicallyBlockedVoyage(unittest.TestCase):
         o = Ops()
         o.create_voyage("DXB", "RTM", vessel_key="tanker")
         o.start()
+        o.tick(now=0.0)                                               # hand-driven clock
         o.advance_hours(6)
         s = o.state()
         self.assertTrue(24.0 < s.lat < 30.5 and s.lon < 56.5, (s.lat, s.lon))   # still inside the Persian Gulf

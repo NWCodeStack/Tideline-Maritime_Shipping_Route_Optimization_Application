@@ -56,9 +56,11 @@ def _zone_rect(key: str, cls: str) -> str:
 
 
 def build_ops_map_html(G, settings: dict, done_pts, ahead_pts, superseded=(), alternatives=(), blocked=(),
-                       ship=None, ship_status: str = "", route_color: str = "#58aaff", height: int = 500) -> str:
+                       ship=None, ship_status: str = "", route_color: str = "#58aaff", height: int = 500,
+                       contract: dict | None = None) -> str:
     """Offline live-operations map (no tiles, no folium): network, scenario zones, completed / remaining /
-    superseded / alternative / blocked routes, storm cells, and the SIMULATED ship position."""
+    superseded / alternative / blocked routes, storm cells, and the SIMULATED ship position. With ``contract``
+    (built with ``project=geo_assets.project``) the browser animates the ship between server syncs."""
     import math
     s = normalise(settings)
     over = []
@@ -89,7 +91,15 @@ def build_ops_map_html(G, settings: dict, done_pts, ahead_pts, superseded=(), al
             over.append(f'<g class="xmark"><circle cx="{x:.1f}" cy="{y:.1f}" r="9"/><path d="M{x - 5:.1f},{y - 5:.1f} '
                         f'L{x + 5:.1f},{y + 5:.1f} M{x + 5:.1f},{y - 5:.1f} L{x - 5:.1f},{y + 5:.1f}"/>'
                         f'<title>{key.replace("_", "-").title()} CLOSED (simulated scenario)</title></g>')
-    if ship is not None:
+    extra = ""
+    if contract is not None:                  # animated: the browser script drives the ship, tip and completed track
+        import anim
+        over.append('<path id="tl-done" class="done"><title>Completed track</title></path>'
+                    '<path id="tl-tip" class="done"/>'
+                    '<g id="tl-ship"><g id="tl-rot"><path class="ship" fill="#ffffff" d="M0,-11 L7,9 L0,5 L-7,9 Z"/></g>'
+                    '<text class="shiplabel" x="12" y="-10">SIMULATED POSITION</text></g>')
+        extra = anim.svg_script(anim.contract_json({**contract, "world_w": WORLD_W}))
+    elif ship is not None:
         x, y = project(ship.lat, ship.lon)
         fill = {"blocked": RED, "arrived": "#4de0c8"}.get(ship_status, "#ffffff")
         over.append(f'<g transform="translate({x:.1f},{y:.1f}) rotate({ship.course_deg:.0f})"><path class="ship" fill="{fill}" '
@@ -101,11 +111,11 @@ def build_ops_map_html(G, settings: dict, done_pts, ahead_pts, superseded=(), al
               f'<span class="k"><b style="color:{AMBER}"></b>alternative</span>'
               f'<span class="k"><b style="color:{RED}"></b>blocked / closed</span>'
               f'<span class="k"><b style="color:{STORM}"></b>storm</span>')
-    return build_map_html(G, [], settings, height=height, overlay="".join(over), legend_html=legend)
+    return build_map_html(G, [], settings, height=height, overlay="".join(over), legend_html=legend, extra_script=extra)
 
 
 def build_map_html(G, routes: list[dict], settings: dict | None = None, height: int = 520, overlay: str = "",
-                   legend_html: str | None = None) -> str:
+                   legend_html: str | None = None, extra_script: str = "") -> str:
     """``routes`` items: {label, color, result (RouteResult), hold (RouteResult | None)}."""
     s = normalise(settings)
 
@@ -220,13 +230,15 @@ svg{{width:100%;height:100%;display:block;cursor:grab;touch-action:none;user-sel
 <div class="tools"><button id="zi" title="Zoom in">+</button><button id="zo" title="Zoom out">&minus;</button><button id="zr" title="Reset">&#x2922;</button></div>
 {legend_block}</div>
 <script>
-const svg=document.getElementById('m'),W={WORLD_W:.0f},H={WORLD_H:.0f};
+const svg=document.getElementById('m'),W={WORLD_W:.0f},H={WORLD_H:.0f},KEY={json.dumps('tl-svg-view' if extra_script else '')};
 const state={json.dumps({"x": 0, "y": 0, "w": WORLD_W, "h": WORLD_H})};
 function fit(){{const r=svg.getBoundingClientRect(),ar=r.width/r.height;
  let w=W,h=W/ar; if(h>H){{h=H;w=H*ar}} state.w=w;state.h=h;state.x=(W-w)/2;state.y=(H-h)/2;apply()}}
 function apply(){{state.w=Math.min(Math.max(state.w,140),W);state.h=state.w*(svg.getBoundingClientRect().height/svg.getBoundingClientRect().width);
  state.x=Math.min(Math.max(state.x,0),W-state.w);state.y=Math.min(Math.max(state.y,0),Math.max(H-state.h,0));
- svg.setAttribute('viewBox',state.x+' '+state.y+' '+state.w+' '+state.h)}}
+ svg.setAttribute('viewBox',state.x+' '+state.y+' '+state.w+' '+state.h);
+ window.__tlScale=svg.getBoundingClientRect().width/state.w;
+ if(KEY){{try{{sessionStorage.setItem(KEY,JSON.stringify([state.x,state.y,state.w]))}}catch(e){{}}}}}}
 function zoom(f,cx,cy){{const r=svg.getBoundingClientRect();cx=cx??r.width/2;cy=cy??r.height/2;
  const px=state.x+cx/r.width*state.w,py=state.y+cy/r.height*state.h;const nw=state.w/f;
  const nh=nw*(r.height/r.width);state.x=px-cx/r.width*nw;state.y=py-cy/r.height*nh;state.w=nw;apply()}}
@@ -236,5 +248,7 @@ svg.addEventListener('pointermove',e=>{{if(!drag)return;const r=svg.getBoundingC
  state.x=drag.sx-(e.clientX-drag.x)/r.width*state.w;state.y=drag.sy-(e.clientY-drag.y)/r.height*state.h;apply()}});
 svg.addEventListener('pointerup',()=>drag=null);
 document.getElementById('zi').onclick=()=>zoom(1.4);document.getElementById('zo').onclick=()=>zoom(1/1.4);document.getElementById('zr').onclick=fit;
-window.addEventListener('resize',fit);fit();
-</script></body></html>"""
+window.addEventListener('resize',fit);
+let saved=null;if(KEY){{try{{saved=JSON.parse(sessionStorage.getItem(KEY))}}catch(e){{}}}}
+if(saved&&saved.length===3&&saved.every(Number.isFinite)){{state.x=saved[0];state.y=saved[1];state.w=saved[2];apply()}}else{{fit()}}
+</script>{f'<script>{extra_script}</script>' if extra_script else ''}</body></html>"""

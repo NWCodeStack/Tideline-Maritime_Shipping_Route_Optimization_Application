@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 import newsparse
 from events import EVENT_BY_KEY
-from ops import DISRUPTIONS, PORTS, VIA_NODES, Ops
+from ops import DISRUPTIONS, MAX_SPEED_H_PER_S, MIN_SPEED_H_PER_S, PORTS, VIA_NODES, Ops, speed_caption
 from voyage import PREFERENCES, VESSELS
 
 # ------------------------------------------------------------------------------------------------
@@ -40,6 +40,8 @@ SCHEMA: dict[str, dict] = {
     "set_preference": {"preference": (str, True, tuple(PREFERENCES))},
     "set_fuel_price": {"price": (float, False, (100.0, 3000.0)), "change_pct": (float, False, (-90.0, 300.0))},
     "set_speed": {"knots": (float, True, (6.0, 25.0))},
+    # playback clock (simulated hours per real second), NOT the ship's speed; values above the maximum are clamped
+    "set_playback": {"hours_per_s": (float, True, (MIN_SPEED_H_PER_S, 10000.0))},
     "compare_route": {"via": (str, True, tuple(VIA_NODES))},
     "explain": {"topic": (str, True, ("status", "eta", "cost", "risk", "options"))},
     "weather": {},
@@ -69,7 +71,8 @@ IMPERATIVE_RE = re.compile(
     r"(simulate|close|shut|block|trigger|apply|activate|enable|set|reroute|re-route|divert|advance|fast[- ]?forward|"
     r"skip|start|begin|pause|stop|freeze|resume|continue|unpause|reset|restart|increase|raise|decrease|lower|cut|"
     r"reduce|switch|use|take|change|place|add|put|create|plan|open|reopen|lift|clear|remove|cancel|run|replay|"
-    r"exit|avoid|find|go|move|jump|make|launch|sail|turn|depart|optimi[sz]e|recalculate|replan|end|quit|leave)\b")
+    r"exit|avoid|find|go|move|jump|make|launch|sail|turn|depart|optimi[sz]e|recalculate|replan|end|quit|leave|"
+    r"play|slow|speed)\b")
 QUESTION_RE = re.compile(
     r"^\s*(is|are|was|were|does|do|did|has|have|can|could|will|should|what|which|how|why|when|where|who|show|tell|"
     r"list|give me|any|explain|describe|summari[sz]e|compare)\b")
@@ -259,7 +262,14 @@ def parse(text: str, ops: Ops) -> list[Op]:
         m = re.search(r"fuel[^.]*?(?:to|at|=)\s*\$?\s*" + NUM, t)
         if m:
             out.append(Op("set_fuel_price", {"price": float(m.group(1))}))
-    m = re.search(NUM + r"\s*(?:knots|kn|kts)\b", t)
+    # playback speed (the simulation clock) is checked first: "knots" alone still means the vessel
+    rate = re.search(NUM + r"\s*(?:h/s|hrs?/s|hours? per (?:real )?second|hours? a second)", t)
+    playback = bool(re.search(r"\b(playback|sim(?:ulation)? speed)\b", t))
+    real_time = bool(re.search(r"\breal[- ]?time\b", t)) and bool(re.search(r"\b(play\w*|run|speed|simulat\w*)\b", t))
+    if rate or real_time or (playback and re.search(NUM, t) and not re.search(NUM + r"\s*(?:knots|kn|kts)\b", t)):
+        hps = MIN_SPEED_H_PER_S if real_time and not rate else float((rate or re.search(NUM, t)).group(1))
+        out.append(Op("set_playback", {"hours_per_s": hps}))
+    m = None if out and out[-1].name == "set_playback" else re.search(NUM + r"\s*(?:knots|kn|kts)\b", t)
     if m and re.search(r"\b(speed|slow|steam|cruise|knots|kn)\b", t) and "storm" not in t:
         out.append(Op("set_speed", {"knots": float(m.group(1))}))
     pref = next((p for p in PREFERENCES if re.search(r"\b" + p + r"\b", t)), None)
@@ -409,6 +419,11 @@ def execute(op: Op, ops: Ops, intel: dict | None = None) -> str:
         return f"Fuel price ${before:,.0f}/t → ${price:,.0f}/t (assumption). {msg}"
     if op.name == "set_speed":
         return ops.update_config(source=src, cruise_speed_kn=a["knots"])
+    if op.name == "set_playback":
+        asked = a["hours_per_s"]
+        ops.set_speed(asked)
+        note = f" (clamped from {asked:g} h/s)" if asked > MAX_SPEED_H_PER_S else ""
+        return f"Playback speed set: {speed_caption(ops.speed)}{note}."
     if op.name == "compare_route":
         return ops.compare_via(a["via"])
     if op.name == "explain":

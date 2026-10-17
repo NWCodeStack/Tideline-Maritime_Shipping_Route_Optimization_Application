@@ -22,7 +22,7 @@ from data_engine import build_maritime_graph
 from events import EVENT_CATALOG
 from llm import get_provider
 from ml_models import HULL, load_or_train_model
-from ops import SPEEDS
+from ops import SPEEDS, nearest_stop_label
 
 
 # ------------------------------------------------------------------------------------------------------
@@ -100,7 +100,7 @@ class Page:
             ss[f"inc_{spec.key}"] = ops.settings[spec.key]
         ss["inc_hurricane_track"] = ops.settings["hurricane_track"]
         ss["inc_picker"] = P.selected_incidents(ops.settings)
-        ss["play_speed"] = next((k for k, v in SPEEDS.items() if v == ops.speed), "10 h/s")
+        ss["play_speed"] = nearest_stop_label(ops.speed)
 
     def show_toasts(self) -> None:
         for msg in self.ss.pop("_flash", []):

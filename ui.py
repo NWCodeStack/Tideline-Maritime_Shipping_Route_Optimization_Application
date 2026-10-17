@@ -73,7 +73,6 @@ div[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:10px}
 .live-strip b{color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}
 .live-badge{display:inline-flex;align-items:center;gap:7px;font-weight:800;letter-spacing:.1em;font-size:12px;color:var(--mint);text-transform:uppercase}
 .live-badge.paused{color:var(--gold)}.live-badge.blocked{color:var(--red)}.live-badge.idle{color:var(--muted)}
-.timejump{color:#c4b5fd;font-weight:700}
 .pulse{width:8px;height:8px;border-radius:50%;background:currentColor;display:inline-block}
 .live-badge.playing .pulse{animation:pulse 1.6s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
@@ -157,14 +156,12 @@ def metric_cards(cards: list[tuple]) -> str:
     return f'<div class="metric-grid">{"".join(out)}</div>'
 
 
-def live_strip(state: str, items: list[tuple], jump_h: float = 0.0) -> str:
+def live_strip(state: str, items: list[tuple]) -> str:
     """Telemetry row. state in playing | paused | blocked | idle; items: (label, value)."""
     badge = {"playing": "Simulated tracking", "paused": "Simulated tracking · paused",
              "blocked": "Simulated tracking · voyage blocked", "idle": "Simulated tracking · not started"}[state]
     cells = "".join(f"<span>{html.escape(l)} <b>{html.escape(v)}</b></span>" for l, v in items)
-    jump = (f'<span class="timejump">TIME-LAPSE: each refresh jumps ~{jump_h:g} simulated hours</span>'
-            if state == "playing" and jump_h >= 6 else "")
-    return f'<div class="live-strip"><span class="live-badge {state}"><span class="pulse"></span>{badge}</span>{cells}{jump}</div>'
+    return f'<div class="live-strip"><span class="live-badge {state}"><span class="pulse"></span>{badge}</span>{cells}</div>'
 
 
 def timeline(entries: list[dict], limit: int = 14) -> str:

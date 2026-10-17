@@ -8,7 +8,10 @@ from __future__ import annotations
 
 
 import folium
+from branca.element import MacroElement
+from jinja2 import Template
 
+import anim
 from data_engine import GEO_ZONE, RED_SEA_ZONES
 from events import HURRICANE_TRACKS, normalise
 from panels import hazard_tooltip
@@ -159,10 +162,24 @@ def _ship_icon(course: float, status: str) -> folium.DivIcon:
     return folium.DivIcon(html=svg, icon_size=(26, 26), icon_anchor=(13, 13))
 
 
+class _AnimScript(MacroElement):
+    """Runs ``anim.leaflet_script`` inside the st_folium iframe, where ``map_div`` is the map. The script text only
+    changes when the animation contract does, so streamlit-folium re-runs it only then."""
+    _template = Template("{% macro script(this, kwargs) %}{{ this.js }}{% endmacro %}")
+
+    def __init__(self, js: str):
+        super().__init__()
+        self._name = "AnimScript"
+        self.js = js
+
+
 def build_ops_layer(G, voyage, done_pts, ahead_pts, waypoints, ship, candidates_pts=(), weather_pts=(),
-                    route_color=BLUE, port_warnings=()) -> folium.FeatureGroup:
-    """Everything that moves: completed track, remaining route, abandoned / blocked routes, alternatives, port
-    warnings (they depend on where the ship is), ship."""
+                    route_color=BLUE, port_warnings=(), contract=None) -> folium.FeatureGroup:
+    """Abandoned / blocked routes, alternatives, port warnings, waypoints and weather, plus the ship.
+
+    Legacy mode (no ``contract``): completed track, remaining route and a static ship marker, rebuilt every tick.
+    Animated mode: the whole planned route is drawn once; the ship marker and the completed track are driven in the
+    browser by ``anim.leaflet_script`` from the contract, so nothing here changes while the ship sails."""
     fg = folium.FeatureGroup(name="Voyage")
     for w in port_warnings:
         color = RED if w["kind"] == "unreachable" else AMBER
@@ -179,11 +196,18 @@ def build_ops_layer(G, voyage, done_pts, ahead_pts, waypoints, ship, candidates_
     if voyage.blocked_remaining and len(voyage.blocked_remaining) > 1:
         folium.PolyLine(unwrap(voyage.blocked_remaining), color=RED, weight=3, opacity=0.9, dash_array="4 6",
                         tooltip="Planned route - BLOCKED").add_to(fg)
-    if len(ahead_pts) > 1:
-        folium.PolyLine(unwrap(ahead_pts), color=route_color, weight=4, opacity=0.95,
-                        tooltip="Remaining route (current plan)").add_to(fg)
-    if len(done_pts) > 1:
-        folium.PolyLine(unwrap(done_pts), color=MINT, weight=4.5, opacity=0.95, tooltip="Completed track").add_to(fg)
+    if contract is not None:
+        plan = anim.plan_points(contract["track"])
+        if len(plan) > 1:
+            folium.PolyLine(plan, color=route_color, weight=4, opacity=0.95,
+                            tooltip="Route (current plan); the completed part is drawn over it in mint").add_to(fg)
+    else:
+        if len(ahead_pts) > 1:
+            folium.PolyLine(unwrap(ahead_pts), color=route_color, weight=4, opacity=0.95,
+                            tooltip="Remaining route (current plan)").add_to(fg)
+        if len(done_pts) > 1:
+            folium.PolyLine(unwrap(done_pts), color=MINT, weight=4.5, opacity=0.95,
+                            tooltip="Completed track").add_to(fg)
     for w in waypoints:
         folium.CircleMarker([w["lat"], w["lon"]], radius=4, color="#cde7ed", weight=1, fill=True,
                             fill_color="#102236", fill_opacity=1,
@@ -198,6 +222,9 @@ def build_ops_layer(G, voyage, done_pts, ahead_pts, waypoints, ship, candidates_
                                      f"waves {v.get('wave_height')} m"
                                      + (f", wind {v.get('wind_speed_10m')} kn" if v.get('wind_speed_10m') is not None else "")
                                      + f" ({p['severity']})")).add_to(fg)
+    if contract is not None:
+        _AnimScript(anim.leaflet_script(anim.contract_json(contract))).add_to(fg)
+        return fg
     folium.Marker([ship.lat, ship.lon], icon=_ship_icon(ship.course_deg, voyage.status),
                   tooltip=(f"SIMULATED position {ship.lat:.2f}, {ship.lon:.2f} · {ship.sog_kn:.1f} kn · "
                            f"course {ship.course_deg:03.0f}° · {ship.activity}")).add_to(fg)
