@@ -3,8 +3,8 @@
 Context for anyone (human or AI) picking up this repo. It condenses the full build thread: what the project is, what
 was asked for, what was decided and why, how the code fits together, and what is still open.
 User-facing docs live in `README.md` (refreshed in Phase 6); this file is
-the engineering history and the house rules. Last updated 2026-10-16, after Phase 6 (committed) plus Phase 7
-(continuous playback, implemented and tested but NOT committed): see "Phase 7" under Known limitations / next steps.
+the engineering history and the house rules. Last updated 2026-10-16, after Phases 1-7 (all committed, pushed and deployed):
+see "Phase 7" under Known limitations / next steps.
 
 ## What this is
 
@@ -27,9 +27,9 @@ hackathon project (c0mpiled-14, YC RFS *Operating Systems for the Physical World
 
 ## State of the repo (read this first)
 
-* Branch `main`, **nothing pushed, nothing deployed, no remote configured.** The user said "don't push yet" at every step.
+* Branch `main`, **pushed** to the public GitHub repo `NWCodeStack/Tideline-Maritime_Shipping_Route_Optimization_Application` and **deployed** on Streamlit Community Cloud at https://tideline.streamlit.app/ (rules mode, no secrets). History was rewritten once (2026-10-16) so every commit uses the GitHub no-reply identity; keep `git config user.email` set to the no-reply address and never commit real names or emails.
 * Tag `v1-demo` = the last commit before the upgrade (`d242ec6`), the safe fallback demo.
-* Commits since then (all local):
+* Commits since then (pushed):
 
 | Commit | What |
 | --- | --- |
@@ -125,7 +125,7 @@ Header, "Latest reroute" banner, 4 KPI cards and the telemetry strip are full wi
    animation frames.
 8. **Session isolation.** Mutable state only in `st.session_state`; cached resources are read-only.
 9. **Lightweight and Streamlit-compatible** (local + free Streamlit Community Cloud). Don't swap frameworks.
-10. **Don't push or deploy** until the user says so. Commit only when asked. No local paths or personal emails in
+10. **Don't push or deploy** until the user says so (they have, for the current state). Commit only when asked. No local paths or personal emails in
     tracked files (a public repo is planned).
 
 ## How key mechanisms work
@@ -216,7 +216,7 @@ Header, "Latest reroute" banner, 4 KPI cards and the telemetry strip are full wi
    browser the same map iframe survived all five right-hand tab switches (it is recreated after a scenario change, as
    before); risk scores show a band and the caption; every cost line shows its basis; no API key needed; tests pass.
 
-**Phase 7: continuous playback (DONE 2026-10-16; uncommitted, review pending)**
+**Phase 7: continuous playback (DONE 2026-10-16; committed and pushed; code-review findings below still open)**
 
 Goal (user): a continuous playback speed control (real time up to 200 h/s instead of steps starting at 1 h/s) and a ship
 that glides at up to 60 fps in the browser, cheaply: adaptive frame pacing, no per-second map reloads, the rest of the
@@ -284,7 +284,7 @@ measured (the loop drew on 87% of callbacks and was never the bottleneck); (b) w
 fragment ticks arrive ~6 s apart, hit the 3 s stall cap and the server resyncs the ship backwards by up to 30 simulated hours
 at 10 h/s (designed behaviour; a visible tab ticks every 1 s and does not); (c) not browser-tested: Panama close/reopen turn,
 the demo stopping at Port Said, the offline SVG map animation, 5 reroutes loop count, near-idle CPU at 0.1 h/s;
-(d) `/code-review` and `/python-review` not yet run. Do not commit until the user says so; never push.
+(d) `/code-review` ran: open findings are the stall-resync backward jump, the seek echo guard swallowing near-equal real seeks, port warnings only refreshed on full reruns, `IMPERATIVE_RE` gaining `play|slow|speed`, `playback <number>` parsing durations as h/s, `anim._unwrap_lon` duplicating `folium_map.unwrap`, and missing tests for the seek guard / `_tick_and_sync`.
 
 *Housekeeping:* an untracked `tideline-phase6.zip` appeared in the project root that no command from this work created;
 leave or delete it by hand, it is not source. `.claude/launch.json` was temporarily edited for the spike and restored
