@@ -235,7 +235,7 @@ def _advanced_objective(pg) -> None:
              help=" · ".join(f"{V.PREFERENCES[k]}: {t}" for k, t in V.PREFERENCE_HELP.items()))
     if cfg.preference == "balanced":
         for col, (label, key) in zip(st.columns(3), (("Time", "cfg_w_time"), ("Cost", "cfg_w_cost"),
-                                                     ("Risk", "cfg_w_risk"))):
+                                                     ("Risk", "cfg_w_risk")), strict=False):
             col.slider(label, 0.0, 3.0, step=0.25, key=key, on_change=pg.on_cfg, args=("weights",))
     st.multiselect("Avoid chokepoints", list(CHOKEPOINTS), key="cfg_avoid", format_func=CHOKEPOINTS.get,
                    on_change=pg.on_cfg, args=("avoid",), help="Treated as closed for this voyage.")

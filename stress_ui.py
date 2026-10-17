@@ -61,7 +61,7 @@ def stress_tab(pg):
     rerouted = sum(x.rerouted for x in comps)
     unreachable = sum(not x.stressed.feasible for x in comps)
     cards = []
-    for x, tone in zip(comps, ("blue", "gold")):
+    for x, tone in zip(comps, ("blue", "gold"), strict=False):
         s = x.stressed
         cards.append((f"{x.agent.vessel.label} all-in", ui._usd(s.total_usd) if s.feasible else "No route",
                       f"{ports[s.origin]} → {ports[s.destination]} · {s.days:.1f} days" if s.feasible else s.reason[:70],
@@ -87,11 +87,11 @@ def stress_tab(pg):
                       returned_objects=[], key="folium_map")
         else:
             svg_layers = [{"label": l["label"], "result": l["result"], "hold": l["hold"], "color": col}
-                          for l, col in zip(layers, (ui.CONTAINER_COLOR, ui.TANKER_COLOR))]
+                          for l, col in zip(layers, (ui.CONTAINER_COLOR, ui.TANKER_COLOR), strict=False)]
             components.html(build_map_html(G1, svg_layers, active_settings, height=540), height=548)
     with right:
         st.markdown('<div class="section-name">Agent decisions</div>', unsafe_allow_html=True)
-        for x, col, (o, d) in zip(comps, (ui.CONTAINER_COLOR, ui.TANKER_COLOR), ((c_o, c_d), (t_o, t_d))):
+        for x, col, (o, d) in zip(comps, (ui.CONTAINER_COLOR, ui.TANKER_COLOR), ((c_o, c_d), (t_o, t_d)), strict=False):
             st.markdown(ui.agent_card(x, col, ports[o], ports[d]), unsafe_allow_html=True)
         notes = []
         for x in comps:

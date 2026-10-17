@@ -3,9 +3,10 @@
 Hackathon prototype (c0mpiled-14 · UC Berkeley · YC RFS: *New Operating Systems for the Physical World*).
 
 Plan a voyage, start the simulated clock and watch a ship move along modelled sea lanes. Close a strait, raise a
-storm or change fuel prices (from the incident panel or by asking the AI copilot), and the rest of the voyage is
+storm or change fuel prices (from the incident picker or by asking the AI copilot), and the rest of the voyage is
 re-optimised **from where the ship is now**. Live marine weather (Open-Meteo) and maritime headlines (GDELT /
-Google News) feed the Alerts & Intelligence panel. The original multi-agent stress test (container ship vs oil tanker) is kept as a tab.
+Google News) feed the Alerts & intelligence tab. The original multi-agent stress test (container ship vs oil tanker)
+is kept as a second top-level tab.
 
 > Vessel positions are **simulated** (no AIS feed). The network, tolls, risk and costs are synthetic, modelled
 > estimates. Disruptions are user-triggered **scenarios**, never verified closures. Not for navigation or safety use.
@@ -21,37 +22,41 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The first launch trains the fuel model (~2 s) and caches it in `models/fuel_model.pkl` (git-ignored, rebuilt
-automatically). No API key is needed. Set `TIDELINE_OFFLINE=1` to disable all network calls (offline demo / tests).
+The first launch trains the fuel model on 5,000 synthetic voyages and caches it in `models/fuel_model.pkl`
+(git-ignored, rebuilt automatically). No API key is needed. Set `TIDELINE_OFFLINE=1` to disable all network calls
+(offline demo / tests).
 
-Other commands: `python -m pytest -q` (all 79 tests; `pytest.ini` selects them), `python app.py` (console stress-test demo),
-`python ml_models.py` (train + print metrics), `python routing_engine.py` (CLI over all presets).
+Other commands: `python -m pytest -q` (all tests; `pytest.ini` selects `test_routing.py` + `tests/`),
+`python app.py` (console stress-test demo), `python ml_models.py` (train + print metrics),
+`python routing_engine.py` (CLI over all presets).
 
 ## Using the app
 
-The page follows one hierarchy: **header** (status: Ready / Simulation active / paused / blocked) →
-**Voyage & Simulation | Alerts & Intelligence** → **Route KPIs** → **Live route map | Operations Copilot** →
-**Rerouting decision & event timeline**. Advanced configuration lives in the sidebar (collapsed by default, `»`).
+Header, the "Latest reroute" banner, four KPI cards (ETA, distance remaining, projected cost, risk ahead) and a
+telemetry strip run full width. Below them are two columns:
 
-* **Voyage & Simulation** - from / to / vessel (container, oil tanker, bulk carrier, LNG carrier; locked once underway,
-  **Reset** to change), Start / Pause / Resume, +1 day, Reset, playback speed (1-100 simulated hours per second; at
-  high speed the telemetry strip says each refresh is a time-lapse jump), the **hackathon demo** buttons, the four
-  closure toggles (Suez, Bab-el-Mandeb, Hormuz, Panama) and *Clear all scenarios*. Every scenario is SIMULATED.
-* **Alerts & Intelligence** - alerts (blocked voyage, reroutes, active scenarios, forecast hazards ahead, unverified news
-  advisories), then **Weather** (Open-Meteo, matched to the ship's simulated arrival time; out-of-horizon, unavailable
-  and stale states labelled; optional *Forecast-informed simulation*) and **News & Security** (GDELT, Google News RSS
-  fallback, or a clearly labelled demo set).
-* **Route KPIs** - ETA, distance remaining, projected cost (fuel, tolls, spent) and risk ahead; ETA, cost and risk carry
-  a MODEL ESTIMATE label.
-* **Live route map** - interactive Leaflet map (only the voyage layer is pushed each tick, so zoom/pan survive
-  playback) or the **Offline map** (SVG, no tiles or folium needed) from the selector above the map. Mint = completed,
-  solid = remaining, grey dashed = superseded, amber dotted = alternatives, red dashed = blocked, purple = storms.
-  Drag the time slider or click a waypoint to jump.
-* **Rerouting decision & event timeline** - a recommendation card (what changed, why, and ETA / distance / fuel /
-  cost / risk deltas), a compact before/after table, the route options considered, and the timeline.
-* **Sidebar (advanced)** - cargo owner and departure time, fuel price and fixed speed, objective
-  (Fastest / Cheapest / Safest / Balanced + weights), chokepoints to avoid, canal / berth delays and port congestion,
-  storm scenario, more scenarios and fees (Red Sea escalation, Taiwan, hurricane, drought, presets), methodology.
+* **Left (never inside a tab, so switching tabs cannot reset it):** the live route map with a time slider and legend,
+  and the Operations Copilot docked under it.
+* **Right, five tabs** (the selected tab survives reruns):
+  * **Operate** - status line (stay / change course / blocked), From / To / Vessel (container, oil tanker, bulk
+    carrier, LNG carrier; locked once underway, **Reset** to change), Start / Pause / Resume, +1 day, playback speed,
+    the hackathon demo buttons, an incident picker (Suez, Bab-el-Mandeb, Hormuz, Panama closed) and a
+    "Storms, fees and more scenarios" expander.
+  * **Optimize** - preset (Balanced / Cheapest / Fastest / Safest / Greenest, or Custom), value of time, carbon price
+    and fuel price source; **Advanced** holds objective weights, chokepoints to avoid, EU ETS, bunker price, fixed
+    speed, cargo owner, departure time and delays.
+  * **Route comparison** - the decision card, route options side by side (with CO2 and risk band), the cost breakdown,
+    the risk panel, sea-state checkpoints ahead and a fuel-burn chart.
+  * **Alerts & intelligence** - alerts, **Weather** (Open-Meteo, matched to the ship's simulated arrival time, with an
+    opt-in *Forecast-informed simulation*) and **News & Security** (GDELT, Google News RSS fallback, or a labelled
+    demo set), the risk legend and the event timeline.
+  * **Data sources** - every input behind the plan with its basis, date and link, plus the methodology.
+* The second top-level tab, **Multi-agent stress test**, runs the original container-ship vs tanker comparison.
+
+The map is an interactive Leaflet map (only the voyage layer is pushed each tick, so zoom and pan survive playback) or
+an **Offline map** (SVG, no tiles or folium needed). Mint = completed, solid = remaining, grey dashed = superseded,
+amber dotted = alternatives, red dashed = blocked, purple = storms, tinted boxes = security zones by risk band, red
+ring = port the ship can no longer reach, amber ring = port congestion scenario.
 
 ### Hackathon demo
 
@@ -61,16 +66,60 @@ position and the before/after comparison appears. **Instant demo** does the same
 **Replay** restarts it; **Exit demo** restores the voyage, assumptions and scenarios you had before. It needs no live
 APIs and no LLM key. The copilot understands "run the demo" / "exit demo".
 
-### Forecast-informed simulation (opt-in)
+### Panama close / reopen script
 
-Off by default. When on, Open-Meteo forecast points **ahead of the ship** whose significant wave height at the simulated
-ETA is at or above the threshold become labelled storm cells ("FORECAST-INFORMED SCENARIO"), the remaining route is
-re-assessed from the ship's position, and the before/after appears in the decision panel. Cells only accumulate
-(deduplicated, capped at 6) so the route cannot oscillate; "Remove forecast-informed storm cells" undoes it. Stale or
-unavailable forecasts are never applied. This is a modelled scenario, not a navigation recommendation.
+Shows that a re-plan starts from the ship's position and can turn it round:
 
-Weather assessments are bound to the itinerary they were computed for: after a reroute, reset or new voyage, an older
-forecast is never shown as current (a failed refresh then reports "unavailable" instead of reusing it).
+1. Operate: From **Rotterdam**, To **Los Angeles**, then **Start** (the plan goes through Panama).
+2. After about 10 simulated days (playback 10 h/s, or **+1 day** ten times) add **Panama Canal closed** in the
+   incident picker. The ship is re-planned from where it is, via Cape Horn (offshore lanes along South America, no
+   crossing of the mid-Atlantic).
+3. Let about 4 more days pass, then remove the incident. The decision card reads **CHANGE COURSE NOW**: the ship turns
+   toward Panama (a 4-hour U-turn is charged) if that beats staying on the Cape Horn route by more than the
+   change-course threshold ($25k all-in).
+
+## How the decision works
+
+**Rerouting.** The itinerary is cut at the ship's current simulated time; everything already sailed (distance, hours,
+fuel, tolls, cost) is kept. Only the **remaining** lanes are checked, and a closure the ship has passed or never
+touches does not reroute it. Dijkstra runs from a virtual node on the ship's current lane (continue, or turn back along
+it), then storm cores (≥ 5 m waves) and lanes above the insurer's premium limit are avoided unless nothing else exists
+("forced through"); closures, draft limits and avoided chokepoints are never relaxed. If nothing is reachable the voyage
+is **BLOCKED**, the ship holds position, and the nearest port it can still reach is named.
+
+**Stay or change.** The ship leaves its committed route only if the alternative beats it by the change-course
+threshold (default $25k), judged in the active objective. "Safest" also switches on a 3-point risk-score drop.
+
+**Decision score.** Per lane: cash cost = fuel + tolls + war-risk insurance + time cost + ECA fuel switch + EU ETS.
+Decision score = cash + (value of time - 1) × time cost + carbon price × CO2. Speed is the best of the vessel's options
+on each lane on that score. The carbon price is a decision weight only and is never added to cash cost. Presets set the
+objective, value of time and carbon price: Balanced (1×, $0), Cheapest (1×, $0), Fastest (4×, $0), Safest (1×, $0),
+Greenest (1×, $200/t CO2); moving a slider reads as Custom.
+
+**Risk score.** Each leg combines security (zone base level plus scenarios), weather (half the lane's sea-state
+severity) and traffic (simulated canal delay only) as independent probabilities; legs are weighted by time spent
+exposed. The score is 0-100 with bands **Low** <20, **Guarded** <40, **Elevated** <60, **High** <80, **Severe**. The
+caption shown with every score: *"Risk score (0-100): modelled chance that something disrupts this voyage ... It's a
+relative comparison between routes, not a calibrated probability."* Contributions of the three factors add up to the
+score. Weather is sea-state severity, not yet checked against a ship wave limit.
+
+Fuel burn per lane comes from a random-forest model (`ml_models.py`) fitted to **synthetic** voyages (its R² says
+nothing about real ships); bulk carriers use the tanker hull class and LNG carriers the container hull class.
+
+## What is simulated
+
+| Input | Basis |
+| --- | --- |
+| Vessel position, ETA, fuel, cost, risk | SIMULATED / model estimates, never AIS |
+| Closures, storms, congestion, escalations | SIMULATED scenarios the user switches on; never verified closures |
+| Lane network (99 nodes, 113 lanes), tolls | Synthetic, land-checked lanes with real chokepoint geography |
+| Weather forecast | LIVE (Open-Meteo), with source and fetch time; advisory unless forecast-informed mode is on |
+| News headlines | LIVE (GDELT / Google News) or a labelled demo set; advisory, never closes a corridor or changes risk |
+| ECA zones, EU ETS | ESTIMATED |
+| Port bunker prices | SAMPLE table |
+| Carbon price, value of time, fuel price | USER SETTINGS |
+
+There is no port-draft data, so the app never marks a port "too shallow".
 
 ### Operations Copilot
 
@@ -84,52 +133,37 @@ Only **explicit instructions** change the simulation; everything else is read-on
 | `Is the Strait of Hormuz closed?` | reports the simulated scenario state (and that real closures are not verified) |
 | `Show news about a Suez closure` | headlines only |
 | `Suez closure` / `The Suez Canal has closed.` | ambiguous → asks you to say *simulate* or *what if* |
+| a pasted news report | labelled PREVIEW of a proposed scenario; applied only by the exact reply `Simulate the proposed scenario` |
 
 More examples: `Advance the voyage by 5 days` · `A storm with 6-meter waves is affecting our route. Reroute to avoid
-it.` · `What is the safest available route?` · `How much more expensive is the Cape of Good Hope route?` ·
-`Pause the vessel and explain our current operational risk` · `Run the hackathon demo`.
+it.` · `What is the safest available route?` · `Pause the vessel and explain our current operational risk` ·
+`Run the hackathon demo`.
 
-Pipeline: message → intent classification (action / question / hypothetical / negated / ambiguous) → operation
-extraction (deterministic parser; optional LLM fallback that can only *propose* JSON operations) → schema validation →
-intent gate (the same rules for parser and LLM output) → the same `ops.Ops` methods the dashboard uses → routing engine
-→ page refresh → answer built from real state. The header shows whether you are in **rules-based command mode** (no
-key) or **LLM assist**; each reply is tagged `rules` or `LLM`.
-
-## How rerouting works
-
-1. The itinerary is cut at the ship's current simulated time; everything already sailed (distance, hours, fuel,
-   tolls, cost) is kept.
-2. Only the **remaining** lanes are checked. A closure the ship has already passed, or that its corridor never
-   touches (e.g. Hormuz for Rotterdam → Shanghai), does not reroute it. Conditions that *improve* anywhere (a strait
-   reopens) trigger a re-check too.
-3. Dijkstra runs from a virtual node on the ship's current lane (it may continue or turn back along that lane) over
-   the lane graph, weighted by the chosen objective:
-   * Fastest = hours; Cheapest = fuel + tolls + war-risk insurance + ship operating cost;
-   * Safest = hours × (geopolitical risk + 0.5 × weather risk);
-   * Balanced = w_time·hours/avg + w_cost·cost/avg + w_risk·risk/avg (averages over all lanes).
-   Storm cores (≥ 5 m waves) and lanes above the insurer's premium limit are avoided unless no other route exists
-   ("forced through"); closures, draft limits and avoided chokepoints are never relaxed.
-4. If nothing is reachable the voyage is **BLOCKED** and the ship holds position (e.g. a tanker inside the Persian
-   Gulf when Hormuz closes). Ships never use overland lanes, never cross land, never teleport.
-
-Fuel burn per lane comes from the random-forest model (`ml_models.py`); bulk carriers use the tanker hull class and
-LNG carriers the container hull class (labelled as estimates).
+Pipeline: message → intent classification (action / question / hypothetical / negated / ambiguous / pasted report) →
+operation extraction (deterministic parser; optional LLM fallback that can only *propose* JSON operations) → schema
+validation → intent gate (the same rules for parser and LLM output) → the same `ops.Ops` methods the dashboard uses →
+routing engine → page refresh → answer built from real state. Pasted text is treated as data, never as instructions.
 
 ## Layout
 
 | File | Role |
 | --- | --- |
-| `app.py` | Streamlit entrypoint: page layout, KPI / map fragments, copilot panel, intelligence panel, advanced sidebar, stress-test tab. |
-| `voyage.py` | Voyage simulator: itinerary legs, clock, position interpolation, rerouting from the current position, objectives, risk index. |
+| `app.py` | Streamlit entrypoint: `render_ui` wiring, console demo. |
+| `page.py` | `Page` context: cached resources, widget callbacks, widget <-> controller sync. |
+| `tabs.py` | Header, copilot and the five right-hand tab renderers. |
+| `live.py` | KPI and map fragments that re-run every second while playing. |
+| `intel_ui.py`, `stress_ui.py` | Weather / News panels; the multi-agent stress-test tab. |
+| `voyage.py`, `geo.py` | Voyage simulator (legs, clock, rerouting, objectives); lane geometry. |
 | `ops.py` | Operations controller (one per browser session): the only code that changes simulation state. |
-| `copilot.py` | Command parser, operation schema + validation, executor, response builder. |
-| `llm.py` | Optional Anthropic provider (structured JSON operations, fact-only explanations). |
-| `intel.py` | Open-Meteo marine/wind forecasts, GDELT + Google News RSS headlines, classification, advisories. |
-| `folium_map.py` | Leaflet maps: stress-test map, live base map and the per-tick voyage layer. |
-| `data_engine.py`, `events.py` | Synthetic lane graph (98 nodes, 111 lanes, risk zones) and scenario stressing. |
+| `economics.py`, `risk.py` | Presets, ECA / ETS / carbon / bunker lines; the 0-100 risk score. |
+| `panels.py`, `sources.py`, `newsparse.py` | Pure helpers behind the tabs and map; Data sources rows; pasted-report analysis. |
+| `copilot.py`, `llm.py` | Command parser, validation, executor; optional Anthropic provider. |
+| `intel.py` | Open-Meteo forecasts, GDELT + Google News RSS headlines, advisories. |
+| `folium_map.py`, `map_view.py` | Leaflet maps (with hazard overlay); offline SVG map. |
+| `data_engine.py`, `events.py` | Synthetic lane graph, risk zones, scenario stressing. |
 | `routing_engine.py`, `agents.py`, `ml_models.py` | Per-lane pricing, vessel/cargo profiles, fuel model. |
-| `ui.py`, `map_view.py`, `geo_assets.py` | Styling, SVG fallback map, coastlines + land test. |
-| `tests/` | Acceptance tests (`test_live_ops.py`), demo tests (`test_demo_mode.py`), audit-fix regressions (`test_audit_fixes.py`), original routing/data/ML tests. |
+| `ui.py`, `geo_assets.py` | Styling and HTML builders; coastlines + land test. |
+| `tests/` | One file per phase plus coverage-gap, live-ops, demo, audit and original routing/data/ML tests. |
 
 ## APIs and keys
 
@@ -146,5 +180,5 @@ Forecasts are cached 30 min, headlines 15 min; failing providers back off and th
 
 ## Deploy (Streamlit Community Cloud)
 
-Push the repo to GitHub, create an app with main file `app.py` (Python 3.11-3.13), optionally add the secret above.
-`requirements.txt` is the only dependency file needed.
+Push the repo to GitHub, create an app with main file `app.py` (Python 3.12), optionally add the secret above.
+`requirements.txt` is the only dependency file needed. Not deployed yet.

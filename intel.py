@@ -81,7 +81,7 @@ def fetch_marine(coords: tuple) -> dict:
     try:
         m = marine.json()
     except ValueError:
-        raise IntelError("marine API returned non-JSON")
+        raise IntelError("marine API returned non-JSON") from None
     m = m if isinstance(m, list) else [m]
     if any("hourly" not in x for x in m):
         raise IntelError(str(m[0].get("reason", "marine API returned no hourly data"))[:120])
@@ -271,7 +271,7 @@ def fetch_news_gdelt(max_records: int = 30) -> list[dict]:
     try:
         data = r.json()
     except ValueError:
-        raise IntelError("GDELT returned non-JSON (often a rate-limit notice)")
+        raise IntelError("GDELT returned non-JSON (often a rate-limit notice)") from None
     out = []
     for a in data.get("articles", []):
         try:
@@ -289,7 +289,7 @@ def fetch_news_rss() -> list[dict]:
     try:
         root = ET.fromstring(r.content)
     except ET.ParseError:
-        raise IntelError("news RSS could not be parsed")
+        raise IntelError("news RSS could not be parsed") from None
     out = []
     for it in root.findall("./channel/item"):
         title, link = it.findtext("title") or "", it.findtext("link") or ""

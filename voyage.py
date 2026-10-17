@@ -481,7 +481,7 @@ def _routing_graph(ctx: Context, pos: Position, pref: str, relaxed: bool) -> tup
 
 def _legs_from_path(ctx: Context, path: list, pos: Position, prev_lane, reverses: bool) -> list[Leg]:
     legs: list[Leg] = []
-    for a, b in zip(path, path[1:]):
+    for a, b in zip(path, path[1:], strict=False):
         if a == VIRTUAL:
             if b == pos.y:
                 legs.append(_make_leg(ctx, pos.x, pos.y, pos.f, 1.0, entered=True))

@@ -298,7 +298,7 @@ class RoutingEngine:
         for relaxed in (False, True):
             H = nx.Graph()
             H.add_nodes_from(G.nodes)
-            for key, c in costs.items():
+            for _key, c in costs.items():
                 if c.hard_block or (c.soft_block and not relaxed):
                     continue
                 H.add_edge(c.u, c.v, objective=c.objective)
@@ -322,7 +322,7 @@ class RoutingEngine:
     def _heuristic(G, costs, destination):
         """Admissible A* heuristic: cheapest observed $ per great-circle nm, times the remaining distance."""
         ratios = []
-        for key, c in costs.items():
+        for _key, c in costs.items():
             if c.hard_block:
                 continue
             gc = haversine_nm(G.nodes[c.u]["lat"], G.nodes[c.u]["lon"], G.nodes[c.v]["lat"], G.nodes[c.v]["lon"])
@@ -339,7 +339,7 @@ class RoutingEngine:
     def evaluate_path(self, G: nx.Graph, agent: RoutingAgent, path: list, costs: dict | None = None) -> RouteResult:
         """Re-price a fixed path on (possibly stressed) graph G. Infeasible only on hard closures."""
         costs = costs or self.price_edges(G, agent)
-        for a, b in zip(path, path[1:]):
+        for a, b in zip(path, path[1:], strict=False):
             c = costs.get(frozenset((a, b)))
             if c is None or c.hard_block:
                 res = RouteResult(agent.name, path[0], path[-1], False, reason=f"Lane {a}-{b} is closed.")
@@ -357,7 +357,7 @@ class RoutingEngine:
             ck = G.nodes[n]["chokepoint"]
             if ck and ck not in seen:
                 seen.append(ck)
-        for a, b in zip(path, path[1:]):
+        for a, b in zip(path, path[1:], strict=False):
             c = costs[frozenset((a, b))]
             d = G.edges[a, b]
             res.distance_nm += c.nm
@@ -377,10 +377,10 @@ class RoutingEngine:
             la, lo = np.asarray(d["sample_lat"]), np.asarray(d["sample_lon"])
             if G.nodes[a]["lat"] != la[0] or G.nodes[a]["lon"] != lo[0]:
                 la, lo = la[::-1], lo[::-1]
-            coords.extend(zip(la.tolist(), lo.tolist()))
+            coords.extend(zip(la.tolist(), lo.tolist(), strict=False))
         res.coords = coords
         res.total_usd = res.fuel_usd + res.toll_usd + res.war_usd + res.time_usd
-        sea_nm = sum(costs[frozenset((a, b))].nm for a, b in zip(path, path[1:])
+        sea_nm = sum(costs[frozenset((a, b))].nm for a, b in zip(path, path[1:], strict=False)
                      if costs[frozenset((a, b))].mode != "overland")
         res.avg_speed_kn = sea_nm / max(res.hours, 1e-9)
         res.chokepoints = [CHOKEPOINTS[k] for k in seen if k in CHOKEPOINTS]

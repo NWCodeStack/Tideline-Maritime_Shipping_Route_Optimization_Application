@@ -48,7 +48,7 @@ class GraphTests(unittest.TestCase):
                 continue
             a, b = self.G.nodes[u], self.G.nodes[v]
             la, lo = de.interpolate_lane(a["lat"], a["lon"], b["lat"], b["lon"], max(4, int(d["base_distance_nm"] / 4)))
-            for y, x in zip(la, lo):
+            for y, x in zip(la, lo, strict=False):
                 near_port = any(math.hypot(y - self.G.nodes[p]["lat"], x - self.G.nodes[p]["lon"]) < 0.35
                                 for p in (u, v) if p in ports)
                 self.assertTrue(near_port or not ga.on_land(y, x), f"lane {u}-{v} crosses land near {y:.1f},{x:.1f}")

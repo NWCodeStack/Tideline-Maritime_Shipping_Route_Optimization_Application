@@ -2,8 +2,8 @@
 
 Context for anyone (human or AI) picking up this repo. It condenses the full build thread: what the project is, what
 was asked for, what was decided and why, how the code fits together, and what is still open.
-User-facing docs live in `README.md` (**stale: describes the pre-upgrade layout, refreshed in Phase 6**); this file is
-the engineering history and the house rules. Last updated 2026-10-16, after Phase 5.
+User-facing docs live in `README.md` (refreshed in Phase 6); this file is
+the engineering history and the house rules. Last updated 2026-10-16, after Phase 6.
 
 ## What this is
 
@@ -40,10 +40,11 @@ hackathon project (c0mpiled-14, YC RFS *Operating Systems for the Physical World
 | `8d15ec5` | Phase 5B: hazard overlay (zones by risk band, port warnings) |
 | `b1a21be` | Phase 5C: pasted news reports are data, never instructions |
 | `f21a833` | Phase 5 review fix: map legend explains the overlay |
+| `78e1236`.. | Phase 6: render_ui split (page.py, tabs.py, live.py, ...), route_from helpers, geo.py, lint, README + CLAUDE.md refresh |
 
 * Hidden checkpoints (not on any branch): `git for-each-ref refs/checkpoints` (one per phase); log in
   `.claude/checkpoints.log` (git-ignored). Phase tags `phase1`..`phase5` also exist.
-* **276 tests pass, 95% coverage.** The review/checkpoint pattern after every phase: tests first, implement, full suite,
+* **279 tests pass, 95% coverage.** The review/checkpoint pattern after every phase: tests first, implement, full suite,
   lint (`ruff --select F,B`), `bandit -ll`, browser check, code review, commit locally.
 
 ## Commands
@@ -52,7 +53,7 @@ hackathon project (c0mpiled-14, YC RFS *Operating Systems for the Physical World
 python -m venv .venv && .venv\Scripts\activate          # Windows (Python 3.14 was used; 3.12 untested locally)
 pip install -r requirements.txt
 streamlit run app.py                                    # app (trains models/fuel_model.pkl on first launch)
-python -m pytest -q                                     # 276 tests (pytest.ini selects test_routing.py + tests/)
+python -m pytest -q                                     # 279 tests (pytest.ini selects test_routing.py + tests/)
 python app.py                                           # console stress-test demo
 ```
 `TIDELINE_OFFLINE=1` disables all network calls (tests, offline demos). **No API key is required for anything**, and
@@ -79,7 +80,12 @@ Header, "Latest reroute" banner, 4 KPI cards and the telemetry strip are full wi
 
 | File | Role |
 | --- | --- |
-| `app.py` | Streamlit entrypoint. `render_ui` (one ~540-line function: callbacks, sync, layout, tabs), the two playback fragments (`kpi_fragment`, `map_fragment`), `render_weather`/`render_news`, `stress_tab`, `console_demo()`. `RIGHT_TABS` constant. |
+| `app.py` | Streamlit entrypoint: `render_ui` (~55 lines of wiring), `console_demo()`. |
+| `page.py` | `Page` context (session state, `Ops`, model, graph), widget callbacks, `sync_widgets`, cached resources. |
+| `tabs.py` | `render_header`, `render_copilot`, `render_operate/optimize/compare/alerts/sources`, `render_intel_panel`; `RIGHT_TABS`. |
+| `live.py` | `kpi_fragment`, `map_fragment` (re-run every `TICK_S` while playing), `HAS_FOLIUM`. |
+| `intel_ui.py`, `stress_ui.py` | `render_weather`/`render_news`; `stress_tab` (the original stress test). |
+| `geo.py` | Lane geometry (`node_ll`, `point_on_lane`, `bearing_deg`, `legs_polyline`), re-exported by `voyage`. |
 | `voyage.py` | Simulator core: `VoyageConfig` (incl. `econ`, `change_course_threshold_usd`), `Leg` (fraction `f0->f1` of a lane; carries speed, ECA/ETS/CO2/carbon, risk signals, `turn` flag), `Voyage` (`recommendation`), `plan_voyage`, `split_at`, `reevaluate`, `route_from`, `arrival_lane`, `reprice`, `nearest_reachable_port`, `reachable_ports`, `_worth_changing`, `_change_headline`, objectives, `route_signature`. |
 | `ops.py` | `Ops` controller, the ONLY code that mutates simulation state. Disruptions, storms, congestion, config, `set_economics`, `apply_preset`, playback, demo, `clone()`, `snapshot()`, `proposal` (pending pasted-report scenario). |
 | `economics.py` | `Economics` (frozen dataclass), `PRESETS`, `ECA_BOXES`, `PORT_FUEL_PRICES`, `eca_fraction`, `ets_applies`, `effective_fuel_price`, `breakdown` (cost lines with a data basis). |
@@ -191,16 +197,23 @@ Header, "Latest reroute" banner, 4 KPI cards and the telemetry strip are full wi
 
 ## Known limitations / next steps
 
-**Phase 6 (not started; plan first, wait for approval):**
-1. Split `render_ui` into module-level tab functions (target: `render_ui` < 120 lines, `app.py` < 600, nesting <= 4;
-   today 538 lines / 1000 lines / depth 6). `voyage.py` is 1,082 lines and `route_from` 74 lines: also split.
-2. `refactor-clean` dead code; fix the 4 pre-existing lint notes (`ops.py` unused import/variable, `ui.py` f-string,
-   `voyage.py` unused import, `folium_map.py` unused `math`).
-3. Refresh `README.md` (still describes the old layout) and this file; document the decision score, risk caption and
-   bands, factor/basis list, Panama close/reopen demo script, a "What is simulated" section.
-4. Final check against the six acceptance criteria: Panama close/reopen turns the ship toward Panama; every tab switch
-   keeps the map; every risk score has a band and caption; every cost line names its data basis; runs with no API
-   keys; all tests pass.
+**Phase 6 (done locally, commits `Phase 6a`..): what was and was not done**
+1. `render_ui` is now ~55 lines in `app.py` (131 lines total). The page lives in `page.py` (`Page` context with the
+   callbacks and widget sync), `tabs.py` (header, copilot, five tab renderers), `live.py` (KPI + map fragments),
+   `intel_ui.py`, `stress_ui.py`. `tests/test_phase6_structure.py` guards function length (< 120) and nesting (<= 4).
+   `route_from` was split into `_routing_graph` / `_legs_from_path` / `_no_passage`, and lane geometry moved to `geo.py`
+   (re-exported from `voyage`). **Not done:** `voyage.py` is still ~1,050 lines and `reevaluate` ~125 lines; splitting
+   them risked circular imports (ship-state code needs `Voyage`/`Leg`), so it is left for a later pass.
+2. `ruff --select F,B` is clean (unused imports/variables, loop variables, `raise ... from None`, `zip(strict=False)`,
+   which keeps the old behaviour). No dead-code tool beyond ruff was run. `bandit -ll` is NOT clean: 3 medium notes that
+   pre-date Phase 6 (`ET.fromstring` on the Google News RSS in `intel.py`; `pickle.load` of the locally trained model in
+   `ml_models.py` and `routing_engine.py`). Not fixed.
+3. `README.md` rewritten for the current layout, with the decision score, risk caption and bands, a "What is simulated"
+   table and the Panama close/reopen script. The Panama script's timings (close ~day 10, reopen 4 days later) come from
+   `tests/test_phase1_reroute.py`; the script was not replayed by hand in the browser.
+4. Acceptance check: Panama close/reopen turns toward Panama (test `TestReopenTurnsTowardPanama`); in the built-in
+   browser the same map iframe survived all five right-hand tab switches (it is recreated after a scenario change, as
+   before); risk scores show a band and the caption; every cost line shows its basis; no API key needed; tests pass.
 
 **Open items and known limits**
 * Not deployed. When approved: push to GitHub (`gh` is not installed here: create an empty repo on github.com, add the

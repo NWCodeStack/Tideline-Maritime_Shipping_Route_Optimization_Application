@@ -27,7 +27,6 @@ told this formula - it has to learn the curve from noisy observations.
 from __future__ import annotations
 
 import pickle
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 

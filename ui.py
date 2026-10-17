@@ -136,7 +136,7 @@ PILL = {"active": "Simulation active", "paused": "Simulation paused", "blocked":
 
 def topbar(state: str = "idle", llm_label: str = "") -> str:
     tone = "idle" if state == "arrived" else state
-    meta = (f'<span class="tag-sim">SIMULATED VESSEL</span><span class="tag-live">LIVE WEATHER &amp; NEWS</span>'
+    meta = ('<span class="tag-sim">SIMULATED VESSEL</span><span class="tag-live">LIVE WEATHER &amp; NEWS</span>'
             + (f'<span>{html.escape(llm_label)}</span>' if llm_label else ""))
     return _flat(f"""
 <div class="topbar"><div class="brand"><div class="brand-mark">

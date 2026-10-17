@@ -15,7 +15,7 @@ import time
 from dataclasses import replace
 
 import voyage as V
-from data_engine import CHOKEPOINTS, NODE_DEFS
+from data_engine import NODE_DEFS
 from economics import PRESETS, apply_preset
 from events import EVENT_BY_KEY, STORM_AVOID_WAVE_M, default_settings, describe
 from risk import explain as risk_explain, route_risk
@@ -484,7 +484,7 @@ class Ops:
         self.voyage = V.plan_voyage(self.cfg, self.settings, self.model)
         self.playing = False
         self._last_tick = None
-        v, G = self.voyage, self.G
+        v = self.voyage
         V.log(v, "demo", "Hackathon demo started (SIMULATED scenario)",
               "Rotterdam → Shanghai container ship; a simulated Suez Canal closure will be triggered before the canal.",
               source)

@@ -121,7 +121,7 @@ def build_map_html(G, routes: list[dict], settings: dict | None = None, height: 
             cls = "lane risky"
         else:
             cls = "lane"
-        coords = list(zip(d["sample_lat"].tolist(), d["sample_lon"].tolist()))
+        coords = list(zip(d["sample_lat"].tolist(), d["sample_lon"].tolist(), strict=False))
         tip = (f"{G.nodes[u]['name']} - {G.nodes[v]['name']} | geopolitical {d['geopolitical_risk']:.2f}, "
                f"weather {d['weather_risk']:.2f}" + (" | CLOSED" if d["blocked"] else ""))
         lanes.append(f'<path class="{cls}" d="{_poly_d(coords)}"><title>{html.escape(tip)}</title></path>')
@@ -151,7 +151,7 @@ def build_map_html(G, routes: list[dict], settings: dict | None = None, height: 
                              f'<title>{html.escape(r["label"])}</title></path>')
 
     ports = []
-    for n, d in G.nodes(data=True):
+    for _n, d in G.nodes(data=True):
         if d["kind"] != "port":
             continue
         x, y = project(d["lat"], d["lon"])
@@ -159,7 +159,7 @@ def build_map_html(G, routes: list[dict], settings: dict | None = None, height: 
                      f'<text class="plabel" x="{x + 9:.1f}" y="{y + 4:.1f}">{html.escape(d["name"])}</text>')
 
     labels = []
-    for key, (lat, lon, text) in {
+    for _key, (lat, lon, text) in {
         "hormuz": (27.9, 56.3, "Hormuz"), "suez": (31.4, 33.2, "Suez"), "bab": (11.0, 43.4, "Bab-el-Mandeb"),
         "malacca": (4.7, 99.5, "Malacca"), "panama": (8.2, -79.2, "Panama"),
         "cape": (-36.5, 20.0, "Cape of Good Hope"), "gib": (36.6, -5.4, "Gibraltar"),

@@ -154,7 +154,7 @@ def validate(op: Op) -> Op:
         try:
             val = typ(val) if typ is not bool else (val if isinstance(val, bool) else str(val).lower() == "true")
         except (TypeError, ValueError):
-            raise InvalidOp(f"{op.name}.{arg} must be {typ.__name__}")
+            raise InvalidOp(f"{op.name}.{arg} must be {typ.__name__}") from None
         if isinstance(allowed, tuple) and len(allowed) == 2 and all(isinstance(a, float) for a in allowed):
             if not allowed[0] <= val <= allowed[1]:
                 raise InvalidOp(f"{op.name}.{arg}={val} outside {allowed}")

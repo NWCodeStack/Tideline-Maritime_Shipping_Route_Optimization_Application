@@ -6,7 +6,6 @@ Route lines are colour-coded by vessel: Blue for container ships, Amber for tank
 """
 from __future__ import annotations
 
-import math
 
 import folium
 
@@ -65,7 +64,7 @@ def build_folium_map(G, routes: list[dict], settings: dict | None = None) -> fol
 
 
 def _ports(m, G) -> None:
-    for n, d in G.nodes(data=True):
+    for _n, d in G.nodes(data=True):
         if d["kind"] == "port":
             folium.CircleMarker([d["lat"], d["lon"]], radius=5, color="#e8f3fa", weight=2, fill=True,
                                 fill_color="#0d1c2c", fill_opacity=1, tooltip=d["name"]).add_to(m)
@@ -85,7 +84,7 @@ def _network_layers(m, G, s: dict) -> None:
             color, dash, w = AMBER, None, 1.5
         else:
             color, dash, w = "#4a6378", None, 1
-        pts = unwrap(list(zip(d["sample_lat"].tolist(), d["sample_lon"].tolist())))
+        pts = unwrap(list(zip(d["sample_lat"].tolist(), d["sample_lon"].tolist(), strict=False)))
         tip = (f"{G.nodes[u]['name']} to {G.nodes[v]['name']}<br>geopolitical risk {d['geopolitical_risk']:.2f}, "
                f"weather risk {d['weather_risk']:.2f}" + ("<br><b>CLOSED</b>" if d["blocked"] else ""))
         folium.PolyLine(pts, color=color, weight=w, opacity=0.7, dash_array=dash, tooltip=tip).add_to(lanes)

@@ -192,7 +192,7 @@ def _apply_to_edge(d: dict, s: dict) -> None:
             _apply_storm(d, cell, ev)
     if s["atlantic_hurricane"] > 0 and d["mode"] == "sea":
         _, clat, clon, radius = track
-        dist = np.array([haversine_nm(la, lo, clat, clon) for la, lo in zip(d["sample_lat"], d["sample_lon"])])
+        dist = np.array([haversine_nm(la, lo, clat, clon) for la, lo in zip(d["sample_lat"], d["sample_lon"], strict=False)])
         inside = dist < radius
         if inside.any():
             storm = s["atlantic_hurricane"] * 0.97 * (1.0 - 0.45 * (dist / radius) ** 2)
@@ -208,7 +208,7 @@ def _apply_to_edge(d: dict, s: dict) -> None:
 def _apply_storm(d: dict, cell: dict, ev: list) -> None:
     """A user/copilot-placed storm: raise sea state inside its radius. Cores with waves >= STORM_AVOID_WAVE_M are
     pushed over the storm-closure threshold, so routing avoids them unless no other route exists."""
-    dist = np.array([haversine_nm(la, lo, cell["lat"], cell["lon"]) for la, lo in zip(d["sample_lat"], d["sample_lon"])])
+    dist = np.array([haversine_nm(la, lo, cell["lat"], cell["lon"]) for la, lo in zip(d["sample_lat"], d["sample_lon"], strict=False)])
     radius = float(cell.get("radius_nm", 300.0))
     inside = dist < radius
     if not inside.any():
