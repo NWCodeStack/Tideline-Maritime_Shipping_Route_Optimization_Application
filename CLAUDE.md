@@ -1,8 +1,9 @@
 # CLAUDE.md - Tideline project memory
 
-Context for anyone (human or AI) picking up this repo. It condenses the full build thread: what the project is,
-what was asked for, what was decided and why, how the code fits together, and what is still open.
-User-facing docs live in `README.md`; this file is the engineering history and the house rules.
+Context for anyone (human or AI) picking up this repo. It condenses the full build thread: what the project is, what
+was asked for, what was decided and why, how the code fits together, and what is still open.
+User-facing docs live in `README.md` (**stale: describes the pre-upgrade layout, refreshed in Phase 6**); this file is
+the engineering history and the house rules. Last updated 2026-10-16, after Phase 5.
 
 ## What this is
 
@@ -10,144 +11,230 @@ User-facing docs live in `README.md`; this file is the engineering history and t
 hackathon project (c0mpiled-14, YC RFS *Operating Systems for the Physical World*). It is a Python + Streamlit
 "live AI shipping operations simulator":
 
-* a synthetic global lane network (98 nodes, 111 lanes, real chokepoint geography, land-checked lanes);
+* a synthetic global lane network (99 nodes, 113 lanes, real chokepoint geography, land-checked lanes);
 * a random-forest fuel model trained on 5,000 **synthetic** voyages;
-* a simulated vessel that moves along the lanes, with mid-voyage dynamic rerouting from its current position;
-* an Operations Copilot (rules-based command parser, optional Anthropic LLM assist);
+* a simulated vessel that moves along the lanes, with mid-voyage rerouting from its current position, a U-turn cost and
+  a stay-or-change decision threshold;
+* a decision score beyond fuel/tolls: ECA fuel switch, EU ETS, a carbon shadow price, value of time, per-port bunker
+  prices, five objective presets, speed chosen per lane;
+* a 0-100 risk score with bands, a caption and a breakdown that adds up;
+* an Operations Copilot (rules-based command parser, optional Anthropic LLM assist, pasted news treated as data);
 * live Open-Meteo marine weather and GDELT / Google News headlines (advisory only);
+* a hazard overlay on the live map (security zones by risk band, port warnings);
 * a one-click hackathon demo (simulated Suez closure -> Cape of Good Hope diversion);
-* the original multi-agent stress test (container ship vs oil tanker) kept as a second tab.
+* the original multi-agent stress test (container ship vs oil tanker) kept as a second top-level tab.
 
-Repo: `maritime-stress-tester/` (git, branch `main`, no remote yet - **not pushed or deployed**).
+## State of the repo (read this first)
+
+* Branch `main`, **nothing pushed, nothing deployed, no remote configured.** The user said "don't push yet" at every step.
+* Tag `v1-demo` = the last commit before the upgrade (`d242ec6`), the safe fallback demo.
+* Commits since then (all local):
+
+| Commit | What |
+| --- | --- |
+| `6a30fd0` | Phase 1: re-plan from the ship's position, U-turn cost, stay-or-change threshold |
+| `654895b` | Phase 2: presets, ECA / EU ETS / carbon lines, speed per leg, per-port fuel, cost breakdown |
+| `b4688d3` | Phase 3: risk score bands, caption, breakdown that adds up |
+| `7c7fbde` | Phase 4: persistent map beside five tabs, sidebar retired, Data sources tab |
+| `228a819` | Phase 5A: honest infeasibility (nearest reachable port) |
+| `8d15ec5` | Phase 5B: hazard overlay (zones by risk band, port warnings) |
+| `b1a21be` | Phase 5C: pasted news reports are data, never instructions |
+| `f21a833` | Phase 5 review fix: map legend explains the overlay |
+
+* Hidden checkpoints (not on any branch): `git for-each-ref refs/checkpoints` (one per phase); log in
+  `.claude/checkpoints.log` (git-ignored). Phase tags `phase1`..`phase5` also exist.
+* **276 tests pass, 95% coverage.** The review/checkpoint pattern after every phase: tests first, implement, full suite,
+  lint (`ruff --select F,B`), `bandit -ll`, browser check, code review, commit locally.
 
 ## Commands
 
 ```bash
-python -m venv .venv && .venv\Scripts\activate          # Windows
+python -m venv .venv && .venv\Scripts\activate          # Windows (Python 3.14 was used; 3.12 untested locally)
 pip install -r requirements.txt
-streamlit run app.py                                    # app (trains models/fuel_model.pkl on first launch, ~2 s)
-python -m pytest -q                                     # 79 tests (pytest.ini selects test_routing.py + tests/)
+streamlit run app.py                                    # app (trains models/fuel_model.pkl on first launch)
+python -m pytest -q                                     # 276 tests (pytest.ini selects test_routing.py + tests/)
 python app.py                                           # console stress-test demo
 ```
-`TIDELINE_OFFLINE=1` disables all network calls (tests, offline demos). No API key is required for anything.
-Optional `ANTHROPIC_API_KEY` (env or `.streamlit/secrets.toml`, see `.streamlit/secrets.toml.example`) enables LLM assist.
+`TIDELINE_OFFLINE=1` disables all network calls (tests, offline demos). **No API key is required for anything**, and
+the app is meant to stay free to run and deploy. Optional `ANTHROPIC_API_KEY` (env or `.streamlit/secrets.toml`, see
+`.streamlit/secrets.toml.example`) only enables LLM assist; leave it unset on Streamlit Cloud to stay free.
+Dev-only tools used in the venv (not in `requirements.txt`): `pytest-cov`, `ruff`, `bandit`, `pip-audit`, `openpyxl`.
+
+## Page layout (Phase 4)
+
+Header, "Latest reroute" banner, 4 KPI cards and the telemetry strip are full width. Below them two columns:
+
+* **Left (never inside a tab, so switching tabs cannot reset it):** live route map (+ time slider + legend) and the
+  Operations Copilot (chat, example buttons, "Simulate this scenario" button while a pasted-report proposal is pending).
+* **Right, `st.tabs(key="right_tabs")`** (selection survives reruns): **Operate** (status line, From/To/Vessel,
+  playback, demo buttons, compact incident picker `inc_picker`, "Storms, fees and more scenarios" expander),
+  **Optimize** (preset, value of time, carbon price, fuel source; everything else under "Advanced"),
+  **Route comparison** (decision card, options side by side with CO2 and risk band, cost breakdown, risk panel,
+  checkpoint table, fuel-burn chart), **Alerts & intelligence** (alerts, Weather and News sub-tabs, risk legend, event
+  timeline), **Data sources** (every input with basis/date/link, methodology).
+* Top-level tabs stay `Live operations` and `Multi-agent stress test` (the stress test is NOT a right-hand tab).
+* The sidebar is gone (empty). The first right-hand tab is named "Operate" to avoid two tabs called "Live operations".
 
 ## Architecture (where things live)
 
 | File | Role |
 | --- | --- |
-| `app.py` | Streamlit entrypoint. Page layout, the two playback fragments (`kpi_fragment`, `map_fragment`), copilot panel, Weather/News panel (`render_weather`, `render_news`), advanced sidebar, stress-test tab (`stress_tab`), `console_demo()`. |
-| `voyage.py` | Simulator core: `VoyageConfig`, `Leg` (a fraction `f0->f1` of one lane `x->y`), `Voyage`, `plan_voyage`, `advance`, `seek`, `ship_state`, `split_at`, `reevaluate` (reroute from current position), `route_from` (Dijkstra from a virtual node on the current lane), objectives, risk index, `route_signature`. |
-| `ops.py` | `Ops` controller - the ONLY code that mutates simulation state. One instance per browser session in `st.session_state["ops"]`. Disruptions, storms, congestion, config changes, playback (`tick`), demo (`run_demo`, `_demo_trigger`, `exit_demo`), forecast-informed hazards, `clone()` for previews, `snapshot()`, `last_change`. |
-| `copilot.py` | Intent classification (`classify`), deterministic parser (`parse`), fixed op `SCHEMA` + `validate`, intent `gate`, `execute`, `preview`, `handle` pipeline. |
-| `llm.py` | Optional `AnthropicProvider` (official SDK, `claude-opus-5-5`, JSON-schema structured output, refusal fallback beta); `get_provider`. Proposes ops only. |
-| `intel.py` | Open-Meteo marine + wind fetch, `assess_weather` (match forecasts to simulated ETAs), route-bound staleness helpers, `operational_impact`; GDELT -> Google News RSS fallback, classification, `rank_news`, `advisories`, labelled demo headlines. Pure functions (testable with mocked `requests`). |
-| `folium_map.py` | Leaflet maps: stress-test map, live base map (`build_ops_base_map`), per-tick voyage layer (`build_ops_layer`). Esri dark-gray tiles (keyless; CartoDB now needs a key). |
-| `map_view.py` | Self-contained SVG maps: stress-test fallback and the offline live-ops map (`build_ops_map_html`). |
-| `ui.py` | CSS + small HTML builders (topbar/status pill, KPI cards, live strip, timeline, recommendation card, comparison table, banner, methodology). |
-| `data_engine.py`, `events.py` | Lane graph + risk zones; scenario stressing (`apply_events`), incl. Bab-el-Mandeb/Panama closures, fees, storm cells, port congestion. |
-| `routing_engine.py`, `agents.py`, `ml_models.py` | Per-lane pricing (fuel/tolls/war-risk/time), vessel & cargo-owner profiles (container, tanker, bulk, LNG), fuel model. |
-| `tests/` | `test_live_ops.py` (8 acceptance tests + more), `test_demo_mode.py`, `test_audit_fixes.py`, original data/ML/routing tests. |
+| `app.py` | Streamlit entrypoint. `render_ui` (one ~540-line function: callbacks, sync, layout, tabs), the two playback fragments (`kpi_fragment`, `map_fragment`), `render_weather`/`render_news`, `stress_tab`, `console_demo()`. `RIGHT_TABS` constant. |
+| `voyage.py` | Simulator core: `VoyageConfig` (incl. `econ`, `change_course_threshold_usd`), `Leg` (fraction `f0->f1` of a lane; carries speed, ECA/ETS/CO2/carbon, risk signals, `turn` flag), `Voyage` (`recommendation`), `plan_voyage`, `split_at`, `reevaluate`, `route_from`, `arrival_lane`, `reprice`, `nearest_reachable_port`, `reachable_ports`, `_worth_changing`, `_change_headline`, objectives, `route_signature`. |
+| `ops.py` | `Ops` controller, the ONLY code that mutates simulation state. Disruptions, storms, congestion, config, `set_economics`, `apply_preset`, playback, demo, `clone()`, `snapshot()`, `proposal` (pending pasted-report scenario). |
+| `economics.py` | `Economics` (frozen dataclass), `PRESETS`, `ECA_BOXES`, `PORT_FUEL_PRICES`, `eca_fraction`, `ets_applies`, `effective_fuel_price`, `breakdown` (cost lines with a data basis). |
+| `risk.py` | Risk score: `leg_risk` (noisy-OR), `route_risk` (time-weighted, parts add up), `band`, `explain`, `CAPTION`, `BASIS`. |
+| `panels.py` | Pure helpers behind the tabs and map: `INCIDENTS`, `incident_changes`, `options_rows`, `fuel_burn_series`, `checkpoint_rows`, `status_line`, `hazard_zones`, `hazard_tooltip`, `port_warnings`. |
+| `sources.py` | `plan_sources`: rows of the Data sources tab; `BASES` = live / published / estimated / sample / simulated / user setting / unavailable. |
+| `newsparse.py` | Pasted-report analysis: `looks_like_report`, `is_confirmation`, `analyse` -> `Finding` (regions, wording, on-route, at most one proposal). Rules only, no key. |
+| `copilot.py` | `classify`, `parse`, `SCHEMA`/`validate`, `gate`, `execute`, `preview`, `handle`; `_report_reply` / `_apply_proposal` for pasted reports. |
+| `llm.py` | Optional `AnthropicProvider` (proposes ops only). |
+| `intel.py` | Open-Meteo fetch/assess, GDELT -> Google News RSS fallback, region rules, advisories. |
+| `folium_map.py` | Leaflet maps: `build_ops_base_map(hazards=...)` (cached, rebuilt only when scenarios change), `build_ops_layer(port_warnings=...)` (per tick). Esri dark-gray tiles (keyless). |
+| `map_view.py` | Offline SVG maps (no hazard overlay). |
+| `ui.py` | CSS + single-line HTML builders (cards, banner, decision, status line, risk chip/panel, cost breakdown). |
+| `data_engine.py`, `events.py` | Lane graph, risk zones, scenario stressing. |
+| `routing_engine.py`, `agents.py`, `ml_models.py` | Per-lane pricing (`price_edge_batch` takes `econ`), vessel/owner profiles, fuel model. |
+| `tests/` | One file per phase (`test_phase1_reroute`, `..2_economics`, `..3_risk`, `..4_layout` (AppTest), `..4_panels`, `..5_infeasible`, `..5_hazards`, `..5_pasted`) plus `test_coverage_gaps`, `test_live_ops`, `test_demo_mode`, `test_audit_fixes`, originals. |
 
 ## Non-negotiable rules (from the user's requirements)
 
 1. **Honesty labels.** Vessel positions are SIMULATED (never AIS). ETA/fuel/cost/risk are MODEL ESTIMATES. Disruptions
-   are SIMULATED SCENARIOS, never real closures. Open-Meteo / news data is LIVE DATA shown with source + fetch time.
-   Demo headlines are labelled demo. No fabricated data, headlines, dates or sources; no unsupported accuracy claims
-   (the fuel model's R² is fit to synthetic data only). Not for navigation or safety decisions.
-2. **Headlines never close corridors.** News can only raise advisories / offer a button to *simulate* a scenario.
-3. **One mutation path.** Dashboard widgets, the demo and the copilot all call `Ops` methods - no duplicated routing logic.
-4. **Copilot safety.** Only explicit instructions change state. Questions -> read-only answers; hypotheticals and
-   negations ("what if", "don't close…, just explain") -> PREVIEW on `ops.clone()`; ambiguous statements ("Suez closure")
-   -> ask for clarification. The LLM may only propose ops from `SCHEMA`; they pass `validate` + `gate` like parser output.
-   It never executes code.
-5. **Geographic validity.** Ships stay on drawn lanes (no land crossings, no teleporting, no overland lanes for ships).
-   Reroutes start at the ship's current position and preserve distance/time/cost already sailed. Only the *remaining*
-   route is checked (Hormuz closure does not reroute Rotterdam -> Shanghai; a passed chokepoint does not matter). No
-   feasible passage -> status BLOCKED, ship holds position (e.g. tanker inside the Gulf when Hormuz closes).
-6. **Works offline and without keys**, including the demo. Network calls are cached (forecast 30 min, news 15 min),
-   time out, back off on failure, and never run on animation frames.
-7. **Session isolation.** Mutable state only in `st.session_state`; cached resources (model, base graph, priced graphs
-   in `voyage._priced_graph` LRU) are read-only.
-8. **Keep it lightweight and Streamlit-compatible** (local + free Streamlit Community Cloud). Don't swap frameworks.
-9. **Don't push or deploy** until the user reviews. Commit only when asked (the user asked for commits of this work).
+   are SIMULATED SCENARIOS, never real closures. Open-Meteo / news data is LIVE DATA with source + fetch time. ECA/ETS
+   are ESTIMATED, port bunker prices SAMPLE, the carbon price a USER SETTING. No fabricated data, headlines, dates or
+   sources; no unsupported accuracy claims (the fuel model's R² is fit to synthetic data only). No port-draft data
+   exists, so there are **no "too shallow" markers**. Not for navigation or safety decisions.
+2. **Headlines never close corridors or change the risk score.** News raises advisories or proposes a scenario to simulate.
+3. **One mutation path.** Widgets, the demo and the copilot all call `Ops` methods.
+4. **Copilot safety.** Only explicit instructions change state. Questions are read-only; hypotheticals and negations
+   are PREVIEWs on `ops.clone()`; ambiguous statements ask for clarification. The LLM may only propose ops from `SCHEMA`.
+5. **Pasted text is data, never instructions.** A paste (long multi-sentence text with news cues, or a `News:` prefix)
+   gets a labelled PREVIEW and changes nothing; only a short, exact "Simulate the proposed scenario" applies the stored
+   proposal, and that phrase inside a long text confirms nothing. A short paste with no prefix is indistinguishable from
+   a typed command (documented limitation).
+6. **Geographic validity.** Ships stay on drawn lanes; reroutes start at the ship's position and keep what was already
+   sailed and spent; only the remaining route is checked; no feasible passage -> BLOCKED with the nearest reachable port named.
+7. **Works offline and without keys**, including the demo. Network calls are cached, time out, back off, never run on
+   animation frames.
+8. **Session isolation.** Mutable state only in `st.session_state`; cached resources are read-only.
+9. **Lightweight and Streamlit-compatible** (local + free Streamlit Community Cloud). Don't swap frameworks.
+10. **Don't push or deploy** until the user says so. Commit only when asked. No local paths or personal emails in
+    tracked files (a public repo is planned).
 
 ## How key mechanisms work
 
-* **Rerouting** (`voyage.reevaluate`): split itinerary at `t` (`split_at` cuts the current leg exactly; canal queue
-  time and tolls are tracked with `Leg.entered` / `queued_h`), check remaining lanes for closures/changed costs, also
-  re-check when any lane *improves* (reopened strait), build candidates for Fastest/Cheapest/Safest/Balanced from a
-  virtual node on the current lane (forward, or turn back along the lane), pick by the configured objective with a
-  0.5% hold-course tolerance and a 2x penalty for "forced through" (storm/over-premium) routes. Two passes: strict,
-  then relaxed soft blocks; hard closures, draft limits and avoided chokepoints never relax.
-* **Objectives**: Fastest = hours; Cheapest = fuel + tolls + war-risk + ship operating cost; Safest = sea hours x
-  (geo + 0.5 x weather risk); Balanced = weighted sum of the three, each normalised by the network-wide lane average.
-* **Playback**: `Ops.tick()` advances by real elapsed seconds x speed (capped 3 s). Two fragments (`kpi_fragment`,
-  `map_fragment`) run every 1 s while playing and both call `tick` (the second sees ~0 s). Arrival / demo trigger /
-  block -> `st.rerun()` of the whole app.
-* **Map without flicker**: base folium map cached per scenario settings in session; only the voyage `FeatureGroup` is
-  pushed via `st_folium(feature_group_to_add=...)`. `st_folium` attaches that group to the cached map, so it is
-  **detached after every call** (`del base._children["feature_group_*"]`) - otherwise the map script changes each tick
-  and the map remounts. Zoom/pan survive playback.
-* **Widget <-> state sync**: `sync_widgets()` rewrites widget keys from `ops` before widgets render each run; all
-  widgets use `on_change` callbacks. Chat uses `st.chat_input(on_submit=...)` so copilot changes show immediately.
-* **Weather staleness**: assessments carry `route_sig = voyage.route_signature(v)`; after a reroute an older forecast
-  is never shown as current (`intel.reuse_or_unavailable`, `intel.current_for`).
-* **Forecast-informed simulation** (opt-in toggle in the Weather tab): Open-Meteo points *ahead of the ship* with
-  waves >= threshold become storm cells with source `open-meteo-forecast`, deduplicated and capped at 6 (accumulate,
-  never replace -> no route oscillation); stale/unavailable data is never applied; removable in one click.
-* **Demo** (`Ops.run_demo(animate=...)`): saves the user's session once (`_pre_demo`), plans RTM -> SHA container,
-  sails to 50% of the East-Med -> Port Said lane (time-lapse at 50 h/s, or an instant labelled time jump), triggers the
-  simulated Suez closure, records before/after in `ops.demo`. Replay is deterministic; `exit_demo` restores the session;
-  scrubbing cancels a pending trigger; manual advance stops exactly at the trigger point.
+* **Rerouting** (`voyage.reevaluate`): split the itinerary at `t`; candidates for Fastest/Cheapest/Safest/Balanced from a
+  virtual node on the current lane (forward, or turn back). **Root cause of the Panama bug** (ship turned back toward
+  Europe after a reopen): the lane graph had no South American Atlantic coast, so the Cape Horn detour crossed the
+  Atlantic via West Africa. Fixed with offshore Guianas lanes (`ANN-GUI1-SAT4`).
+* **Turns**: reversing costs `TURN_PENALTY_H` (4 h) whether the ship is mid-lane, sitting at a node (`arrival_lane`), or
+  goes forward to the next node and straight back. No turning inside a canal; a canal transit in progress completes
+  even if the canal closes. A mid-lane turn wait keeps the ship's lane position (`split_at`, `ship_state`).
+* **Stay or change** (`_worth_changing`): leave the committed route only if the alternative beats it by
+  `change_course_threshold_usd` (default $25k), judged in the active objective (fastest = hours saved x delay cost;
+  cheapest = expenses; balanced/safest = all-in cost; carbon shadow price counted). "Safest" also switches on a 3-point
+  risk-score drop. Bypassed for explicit `force`/`via` requests and when the objective itself changed (which now
+  re-plans). Output: `Voyage.recommendation` = stay / change_course / blocked and a one-line `CHANGE COURSE NOW: turning
+  north-west from off the Guianas, saves 13.6 d and $5.5M vs continuing via Cape Horn` headline.
+* **Decision score** (`economics.py`, `routing_engine.price_edge_batch`): cash = fuel + tolls + war-risk + time + ECA + EU
+  ETS; score = cash + (value-of-time - 1) x time cost + carbon price x CO2. Speed is the best of the vessel's options
+  per lane on that score; cash totals exclude the carbon shadow price. Presets (Balanced/Cheapest/Fastest/Safest/
+  Greenest) set objective + value of time + carbon price; moving a slider reads as "Custom". Default RTM->SHA cost rose
+  from $10.08M to $10.62M because ECA and ETS are on by default.
+* **Risk score** (`risk.py`): per leg noisy-OR of security (base + scenario), weather (half the lane sea-state severity)
+  and traffic (simulated canal delay only); time-weighted over the route; score = round(100 x risk); bands Low <20,
+  Guarded <40, Elevated <60, High <80, Severe. Parts are attributed proportionally so they sum exactly. The routing
+  objective for "Safest" still minimises risk-hours (`Leg.risk`); the score shows average intensity.
+* **Hazard overlay** (Phase 5B): `panels.hazard_zones` = current level per security zone (stressed vs base lane samples),
+  drawn in the cached base map; `panels.port_warnings` (unreachable via `voyage.reachable_ports`, or congested) in the
+  per-tick layer because it depends on the ship's position (1.3 ms per tick; zones 21 ms, only on scenario change).
+* **Pasted news** (Phase 5C): `copilot.handle` checks confirmation, then `looks_like_report`, before normal parsing;
+  `_report_reply` stores `ops.proposal`; `_apply_proposal` runs exactly that op. `Ops.proposal` is cleared on reset, new
+  voyage and clone. Closure only when the text says closed/blocked/blockade, otherwise Red Sea escalation 0.5 or Taiwan 0.4.
+* **Playback**: `Ops.tick()` by real elapsed seconds x speed; `kpi_fragment` and `map_fragment` run every 1 s while playing.
+* **Map without flicker**: base map cached per scenario settings; only the voyage `FeatureGroup` is pushed; it is
+  detached after every `st_folium` call. Tab switches never rerun. Known quirk: the first one or two reruns after a
+  page load recreate the map once (same on the pre-Phase-4 commit).
+* **Widget <-> state sync**: `sync_widgets()` rewrites widget keys from `ops` each run; widgets use `on_change` callbacks.
+* **Demo**, **weather staleness**, **forecast-informed simulation**: unchanged from the original build (see git history).
 
-## Build history (this thread)
+## Build history
 
-1. **Handoff** from a claude.ai chat ("Hackathon 10/16" / "Hackathon project ideas"); claude.ai would not stay signed
-   in to the in-app browser and Claude in Chrome was not connected, so the user pasted the handoff notes. Project found
-   on disk, venv created, model trained, 24 original tests passed, Streamlit verified. Fixed the map: CartoDB tiles now
-   require an API key -> switched to keyless Esri World Dark Gray. Git initialised; baseline commit `7e5d866`.
-2. **Live ops upgrade** (commit `5799b73`): vessel simulator, mid-voyage rerouting, incident panel, copilot + optional
-   LLM, Open-Meteo + news feeds, bulk/LNG vessels, fixed cruising speed, delays, objectives, 24 acceptance tests,
-   README, requirements, `.gitignore`, secrets example. GDELT rate-limits this machine (429/timeouts) -> Google News
-   RSS fallback added. Bugs found and fixed while verifying: storm-label formatting crash (made scenario changes
-   atomic), clearing scenarios did not revert to Suez (added "improved lanes" re-check), map remount every tick (see
-   detach trick above).
-3. **Hackathon demo mode** + review zip (`dist/tideline-review.zip`, also copied to Downloads) for an external
-   (ChatGPT) review.
-4. **Pre-deployment audit** from that review, implemented in priority order:
-   * Fix 1 (P0) copilot intent bug - all five reported failures ("What happens if Suez closes?", "Do not close Suez…",
-     "Show news about a Suez closure", "What if fuel prices increase by 25%?", "Is Hormuz closed?") now leave state
-     unchanged; previews run on a clone. Note: "The Strait of Hormuz has closed. Does that impact my shipment?" is now
-     answered with a PREVIEW (impact question) instead of applying the scenario.
-   * Fix 2/3 (P0) UI reorganised to the user's sketch: header with status pill -> **Voyage & Simulation | Alerts &
-     Intelligence** (Weather / News tabs directly under alerts) -> 4 container-aware KPI cards -> **Live route map |
-     Operations Copilot** -> **Rerouting decision & event timeline**. Sidebar = advanced settings only, collapsed by
-     default. Text 12-15 px; no overflow verified at 1440 / 1280 / 768 / 375 px.
-   * Fix 4 (P1) forecast-informed mode + route-bound weather staleness.
-   * Fix 5 (P1) offline SVG live map (routes, ship, closures, storms, completed/remaining/superseded/alternatives);
-     time-lapse indicator in the telemetry strip.
-   * Fix 6 (P1) SIMULATED / MODEL ESTIMATE / LIVE DATA labels, rules vs LLM mode chip, methodology in an expander.
-   * Fix 7 (P1) animated demo + "Instant demo", recommendation card + compact before/after, replay/exit.
-   * Fix 8 (P0) clean-venv install from `requirements.txt` (version-bounded), full suite (79 passed), real
-     `streamlit run` startup with no keys, Esri tiles confirmed loading (15/15), secret scan clean, `.gitignore`
-     covers `.env*`, `secrets.toml`, `*.pkl`, `models/`, `*.log`, caches, `dist/`, `.venv`, `.claude/`. Fuel model now
-     runs with `n_jobs=1` (removed ~76k joblib warnings; test run 72 s -> 34 s).
+1. **Handoff** from a claude.ai chat ("Hackathon 10/16"); project found on disk, venv created, model trained, 24
+   original tests passed. Map tiles switched to keyless Esri. Baseline commit `7e5d866`.
+2. **Live ops upgrade** (`5799b73`): vessel simulator, rerouting, incident panel, copilot + optional LLM, Open-Meteo + news,
+   bulk/LNG vessels, README, requirements, secrets example. Google News RSS fallback because GDELT rate-limits.
+3. **Hackathon demo mode** + review zip for an external review (`f3e70e3`), then the **pre-deployment audit** fixes
+   (copilot intent bug, UI reorganisation, forecast-informed mode, offline SVG map, honesty labels, animated demo,
+   clean-venv install, secret scan).
+4. **Coverage + release hygiene** (`d242ec6`, 2026-10-16): 35 coverage-gap tests (87% -> 92%), MIT LICENSE, local path
+   scrubbed from this file, `.coverage` ignored; AgentShield scan (secrets/permissions/hooks/MCP 100; B only because this
+   file lacks prompt-defence wording), pip-audit clean, bandit clean, clean-venv startup verified with no key.
+   `v1-demo` tag.
+5. **Upgrade from `tideline-upgrade-prompt.md`** (a teammate's Pelagic prototype was the reference; its newer copy has
+   the Python modules; it is kept outside the repo). Phase 0 plan approved with these user decisions: stress test stays
+   a top-level tab; Phase 2 first cut (per-port fuel, speed per leg, ECA/ETS/carbon lines, presets), bunkering stops
+   deferred; tag `v1-demo` locally; no Playwright; fuel-burn chart instead of fuel-on-board; copilot docked under the
+   map; `render_ui` split deferred to Phase 6.
+   * Phase 1 (23 tests): see "Rerouting", "Turns", "Stay or change".
+   * Phase 2 (26 tests): see "Decision score". Per-port prices follow Pelagic's normal-times table where it has the port.
+   * Phase 3 (28 tests): see "Risk score". The caption is the user's wording verbatim ("weather beyond the ship's
+     limits" is not strictly true yet: weather is sea-state severity, not checked against a wave limit; the basis column says so).
+   * Phase 4 (36 tests): see "Page layout". Verified in the built-in browser: same map element and zoom through every tab
+     switch, tab memory across reruns, no horizontal overflow at 375 and 768 px.
+   * Phase 5 (48 tests): A honest infeasibility, B hazard overlay, C pasted news. Deferred with reasons: "Today vs Normal"
+     (needs verified, dated, sourced prices; Pelagic's snapshot values could not be verified offline) and the fleet
+     picker (4 vessels x 5 owners already exist; named ships need fuel curves the model lacks).
+6. **Code reviews** found and fixed: Phase 1 (queue time double-counted in the U-turn cost; the dollar threshold ignored
+   non-balanced objectives; changing the objective never re-planned), Phase 2 (threshold ignored the carbon price),
+   Phase 3 (arrived voyages reported a 0 risk; untested panel/tooltip), Phase 5 (overlay was colour-only: legend added).
 
-## Known limitations / possible next steps
+## Known limitations / next steps
 
-* Offline SVG map re-renders each tick during playback (loses its own zoom); the interactive map keeps zoom.
-* The Weather/News slot is briefly empty while a new forecast loads after a reroute.
-* The router cannot "wait out" a storm; a severe Mediterranean storm diverts around the Cape.
-* LLM mode is implemented but untested end-to-end (no key was available).
-* GDELT is usually rate-limited from this machine; news typically comes from the Google News RSS fallback.
-* Deployment: push to GitHub, create a Streamlit Community Cloud app with main file `app.py`, Python 3.12;
-  optional secret `ANTHROPIC_API_KEY`. Waiting on the user's go-ahead.
+**Phase 6 (not started; plan first, wait for approval):**
+1. Split `render_ui` into module-level tab functions (target: `render_ui` < 120 lines, `app.py` < 600, nesting <= 4;
+   today 538 lines / 1000 lines / depth 6). `voyage.py` is 1,082 lines and `route_from` 74 lines: also split.
+2. `refactor-clean` dead code; fix the 4 pre-existing lint notes (`ops.py` unused import/variable, `ui.py` f-string,
+   `voyage.py` unused import, `folium_map.py` unused `math`).
+3. Refresh `README.md` (still describes the old layout) and this file; document the decision score, risk caption and
+   bands, factor/basis list, Panama close/reopen demo script, a "What is simulated" section.
+4. Final check against the six acceptance criteria: Panama close/reopen turns the ship toward Panama; every tab switch
+   keeps the map; every risk score has a band and caption; every cost line names its data basis; runs with no API
+   keys; all tests pass.
+
+**Open items and known limits**
+* Not deployed. When approved: push to GitHub (`gh` is not installed here: create an empty repo on github.com, add the
+  remote), then Streamlit Community Cloud with main file `app.py`, Python 3.12 (untested locally; only 3.14 here),
+  no secrets. First launch trains the fuel model in ~20-30 s on the cloud.
+* Deferred: bunkering stops and tank/reserve hard rules, deadlines (so "what if we arrive a day later?" is unsupported),
+  Pareto set, "Today vs Normal" snapshot, fleet picker, port-draft markers.
+* Weather risk is not checked against a ship wave limit; traffic risk is only the simulated canal delay.
+* Offline SVG map has no hazard overlay and re-renders each tick (loses its own zoom).
+* The router cannot "wait out" a storm; the weather/news slot is briefly empty after a reroute; GDELT is usually
+  rate-limited here (Google News RSS fallback); LLM mode is untested end to end (no key).
+* Every full rerun executes all five tab bodies (Streamlit has no lazy tabs), including the options solve.
+* The right-hand tab strip overflows below ~800 px (last label scrolls); the 1280/1440 px widths were not re-tested.
+* A scratch folder named `tl_prev` at the root of the dev machine's C: drive (a copy of an older commit used for a
+  before/after test) can be deleted by hand; the built-in safety check blocked removing it from the session.
+
+## Working notes for AI sessions in this repo
+
+* Hooks in this environment: a "fact-forcing gate" refuses the first Write/Edit of a file until you state the callers,
+  what it supersedes and the user's instruction (and a real Grep/Glob for new files); it also asks for facts before
+  deletes. State them in text, then retry the same call. Do not batch several first-edits in one parallel message: some
+  get blocked while others apply. A built-in safety check refuses `rm -rf` of non-project folders and must not be
+  worked around.
+* `AppTest.from_file` needs an absolute path (relative paths resolve against the test file). Headless layout tests live
+  in `tests/test_phase4_layout.py`; what they cannot see (the map element surviving tab switches) was checked in the
+  built-in browser with a marker on the Leaflet container.
+* Browser checks: Streamlit element refs go stale after every rerun; re-`find` before clicking.
+* Windows: no bash-only tricks in scripts; pip installs can hit the long-path limit under the scratchpad (use a short path).
 
 ## Conventions
 
 * Match surrounding style: dataclasses, small pure functions, f-strings, comments only where the *why* is non-obvious.
-* HTML builders in `ui.py` must return single-line HTML (Streamlit markdown turns indented HTML into code blocks).
-* Escape `$` in text rendered with `st.markdown` (it starts LaTeX) - see `md()` in `app.py`.
-* Every new state-changing feature goes through `Ops`, gets a timeline entry with a `source`, and a test.
+* HTML builders in `ui.py` / `panels.py` must return single-line HTML and escape anything variable.
+* Escape `$` in text rendered with `st.markdown` (LaTeX) - see `md()` in `app.py`.
+* Every new state-changing feature goes through `Ops`, gets a timeline entry with a `source`, and a test; write the
+  test first (one `tests/test_phaseN_*.py` per feature, unittest style).
 * Run `python -m pytest -q` and check the app in a browser before claiming something works.
